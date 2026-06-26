@@ -1,4 +1,9 @@
 import { useState } from "react";
+import {
+  ComposedChart, Line, Area, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ReferenceLine, ReferenceDot, Label,
+  ResponsiveContainer,
+} from "recharts";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -227,6 +232,63 @@ const card: React.CSSProperties = {
   border: `1px solid ${C.border}`,
   padding: "26px",
 };
+
+// ── Forecast chart data ───────────────────────────────────────────────────
+
+const FORECAST_CHART_DATA = [
+  { period: "W1 Jan", actual: 100.0 },
+  { period: "W2 Jan", actual: 101.2 },
+  { period: "W3 Jan", actual: 99.8 },
+  { period: "W4 Jan", actual: 102.5 },
+  { period: "W1 Feb", actual: 104.1 },
+  { period: "W2 Feb", actual: 103.2 },
+  { period: "W3 Feb", actual: 105.8 },
+  { period: "W4 Feb", actual: 108.4, forecast: 108.4, lower: 108.4, bandWidth: 0 },
+  { period: "W1 Mar", forecast: 110.2, lower: 106.4, bandWidth: 7.6 },
+  { period: "W2 Mar", forecast: 111.8, lower: 107.4, bandWidth: 8.8 },
+  { period: "W3 Mar", forecast: 113.5, lower: 108.2, bandWidth: 10.6 },
+  { period: "W4 Mar", forecast: 114.2, lower: 108.4, bandWidth: 11.6 },
+  { period: "W1 Apr", forecast: 115.8, lower: 109.1, bandWidth: 13.4 },
+  { period: "W2 Apr", forecast: 116.4, lower: 108.8, bandWidth: 15.2 },
+  { period: "W3 Apr", forecast: 117.9, lower: 109.6, bandWidth: 16.6 },
+  { period: "W4 Apr", forecast: 118.5, lower: 109.2, bandWidth: 18.6 },
+];
+
+const FORECAST_EVENTS = [
+  { period: "W3 Jan", value: 99.8, label: "Supply disruption parsed" },
+  { period: "W2 Feb", value: 103.2, label: "Inventory signal changed" },
+];
+
+const FORECAST_METRICS = [
+  { label: "Forecast bias", value: "Bullish", color: C.green },
+  { label: "30-day signal change", value: "+4.8%", color: C.green },
+  { label: "Confidence", value: "78%", color: C.text },
+  { label: "Uncertainty band", value: "\u00B16.2%", color: C.amber },
+  { label: "Top driver", value: "Supply disruption", color: C.text },
+  { label: "Model mode", value: "Signal-adjusted", color: C.textMuted },
+];
+
+function ForecastChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ dataKey: string; value?: number; color?: string }>; label?: string }) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{
+      background: "#fff", border: `1px solid ${C.border}`, borderRadius: "8px",
+      padding: "10px 14px", boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+      fontSize: "12px", lineHeight: 1.6,
+    }}>
+      <p style={{ margin: "0 0 4px", fontWeight: 600, color: C.text }}>{label}</p>
+      {payload.map((entry, i) => {
+        if (entry.dataKey === "lower" || entry.dataKey === "bandWidth") return null;
+        const name = entry.dataKey === "actual" ? "Actual" : "Forecast median";
+        return (
+          <p key={i} style={{ margin: 0, color: entry.color }}>
+            {name}: {entry.value?.toFixed(1)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
 
 // ── AddDomainModal ──────────────────────────────────────────────────────────
 
@@ -590,6 +652,153 @@ function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenera
               borderRadius: "8px", fontSize: "14px", fontWeight: 600, cursor: "pointer",
             }}
           >Generate forecast decision pack</button>
+        </div>
+      </div>
+
+      {/* Signal-Adjusted Forecast chart */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 240px", gap: "18px", marginTop: "18px" }}>
+        <div style={card}>
+          <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: "0 0 4px" }}>
+            Signal-Adjusted Forecast
+          </h3>
+          <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 18px" }}>
+            Indexed market pressure — historical vs. signal-adjusted projection
+          </p>
+          <div style={{ width: "100%", height: 320 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={FORECAST_CHART_DATA} margin={{ top: 20, right: 16, bottom: 4, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+                <XAxis
+                  dataKey="period"
+                  tick={{ fontSize: 11, fill: C.textFaint }}
+                  axisLine={{ stroke: "rgba(0,0,0,0.08)" }}
+                  tickLine={false}
+                />
+                <YAxis
+                  domain={[94, 132]}
+                  tick={{ fontSize: 11, fill: C.textFaint }}
+                  axisLine={false}
+                  tickLine={false}
+                  tickFormatter={(v: number) => v.toFixed(0)}
+                />
+                <Tooltip content={<ForecastChartTooltip />} />
+
+                {/* Confidence band (stacked: transparent base + colored band) */}
+                <Area
+                  stackId="band"
+                  type="monotone"
+                  dataKey="lower"
+                  stroke="none"
+                  fill="transparent"
+                  activeDot={false}
+                  isAnimationActive={false}
+                />
+                <Area
+                  stackId="band"
+                  type="monotone"
+                  dataKey="bandWidth"
+                  stroke="none"
+                  fill="rgba(22,163,74,0.10)"
+                  activeDot={false}
+                  isAnimationActive={false}
+                />
+
+                {/* Historical actual line */}
+                <Line
+                  type="monotone"
+                  dataKey="actual"
+                  stroke={C.text}
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4, fill: C.text, stroke: "#fff", strokeWidth: 2 }}
+                  name="Actual"
+                />
+
+                {/* Forecast median line */}
+                <Line
+                  type="monotone"
+                  dataKey="forecast"
+                  stroke={C.green}
+                  strokeWidth={2}
+                  strokeDasharray="6 3"
+                  dot={false}
+                  activeDot={{ r: 4, fill: C.green, stroke: "#fff", strokeWidth: 2 }}
+                  name="Forecast median"
+                />
+
+                {/* Separator between historical and forecast */}
+                <ReferenceLine
+                  x="W4 Feb"
+                  stroke={C.textFaint}
+                  strokeDasharray="4 4"
+                  strokeWidth={1}
+                >
+                  <Label
+                    value="Forecast start"
+                    position="top"
+                    offset={6}
+                    style={{ fontSize: 10, fill: C.textMuted, fontWeight: 500 }}
+                  />
+                </ReferenceLine>
+
+                {/* Event markers */}
+                {FORECAST_EVENTS.map((evt) => (
+                  <ReferenceDot
+                    key={evt.period}
+                    x={evt.period}
+                    y={evt.value}
+                    r={5}
+                    fill={C.amber}
+                    stroke="#fff"
+                    strokeWidth={2}
+                  >
+                    <Label
+                      value={evt.label}
+                      position="top"
+                      offset={12}
+                      style={{ fontSize: 10, fill: C.textSec, fontWeight: 500 }}
+                    />
+                  </ReferenceDot>
+                ))}
+
+                <Legend
+                  verticalAlign="bottom"
+                  height={32}
+                  iconType="line"
+                  wrapperStyle={{ fontSize: "11px", color: C.textMuted }}
+                  formatter={(value: string) => <span style={{ color: C.textSec, fontSize: "11px" }}>{value}</span>}
+                />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        {/* Right-side forecast metrics */}
+        <div style={{ ...card, padding: "20px", display: "flex", flexDirection: "column", gap: "0px" }}>
+          <h4 style={{ fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 16px" }}>
+            Forecast metrics
+          </h4>
+          {FORECAST_METRICS.map((m, i) => (
+            <div key={m.label} style={{
+              padding: "10px 0",
+              borderBottom: i < FORECAST_METRICS.length - 1 ? `1px solid ${C.borderSub}` : "none",
+            }}>
+              <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 3px" }}>{m.label}</p>
+              <p style={{ fontSize: "14px", fontWeight: 600, color: m.color, margin: 0 }}>{m.value}</p>
+            </div>
+          ))}
+          <div style={{
+            marginTop: "14px", padding: "10px 12px",
+            background: C.greenSubtle, border: `1px solid ${C.greenBorder}`,
+            borderRadius: "8px",
+          }}>
+            <p style={{ fontSize: "11px", color: C.green, margin: 0, fontWeight: 500 }}>
+              Deterministic demo mode
+            </p>
+            <p style={{ fontSize: "10px", color: C.textMuted, margin: "3px 0 0" }}>
+              Signal-adjusted projection using hardcoded sample data
+            </p>
+          </div>
         </div>
       </div>
     </div>
