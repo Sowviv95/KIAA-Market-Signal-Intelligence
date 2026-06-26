@@ -8,7 +8,7 @@ import {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Tab = "intake" | "intelligence" | "forecast";
-type DomainId = "mining" | "freight" | "agriculture";
+type DomainId = "mining" | "freight" | "agriculture" | "custom";
 
 interface Signal {
   name: string;
@@ -203,6 +203,43 @@ const DOMAINS: Record<DomainId, {
       ],
     },
   },
+  custom: {
+    label: "Custom market",
+    urlPlaceholder: "Paste any market report, data feed or intelligence URL",
+    notePlaceholder: "Add notes about your custom market domain. Describe sources, key drivers and expected signal types.",
+    parsedSources: [
+      { name: "Awaiting configuration", type: "—", status: "Pending", quality: "—" },
+    ],
+    signals: [
+      { name: "Primary signal", direction: "Neutral", directionColor: "#6b7280", strength: 50, confidence: "50%" },
+      { name: "Secondary signal", direction: "Neutral", directionColor: "#6b7280", strength: 45, confidence: "45%" },
+      { name: "Market sentiment", direction: "Watch", directionColor: "#d97706", strength: 40, confidence: "40%" },
+    ],
+    drivers: [
+      { name: "Awaiting signal input", contribution: 0 },
+    ],
+    reasoning: {
+      headline: "Awaiting source configuration",
+      body: "Add market sources and notes to generate domain-specific signals. The system will parse inputs and produce a signal-adjusted forecast once data is provided.",
+    },
+    brief: {
+      market: "Custom market",
+      outlook: "Neutral",
+      confidence: "—",
+      outlookText: "Custom domain selected. Add source data and market notes to generate a forecast. Demo mode will produce placeholder signals until real sources are configured.",
+      risks: [
+        "No source data configured yet",
+        "Signal quality depends on input completeness",
+      ],
+      features: [
+        { name: "primary_signal", value: 0.50, direction: "Neutral", directionColor: "#6b7280", source: "—" },
+        { name: "secondary_signal", value: 0.45, direction: "Neutral", directionColor: "#6b7280", source: "—" },
+      ],
+      evidence: [
+        "No sources parsed — awaiting configuration",
+      ],
+    },
+  },
 };
 
 // ── Tokens ─────────────────────────────────────────────────────────────────
@@ -233,40 +270,169 @@ const card: React.CSSProperties = {
   padding: "26px",
 };
 
-// ── Forecast chart data ───────────────────────────────────────────────────
+// ── Per-domain chart & Screen 2 metrics ──────────────────────────────────
 
-const FORECAST_CHART_DATA = [
-  { period: "W1 Jan", actual: 100.0 },
-  { period: "W2 Jan", actual: 101.2 },
-  { period: "W3 Jan", actual: 99.8 },
-  { period: "W4 Jan", actual: 102.5 },
-  { period: "W1 Feb", actual: 104.1 },
-  { period: "W2 Feb", actual: 103.2 },
-  { period: "W3 Feb", actual: 105.8 },
-  { period: "W4 Feb", actual: 108.4, forecast: 108.4, lower: 108.4, bandWidth: 0 },
-  { period: "W1 Mar", forecast: 110.2, lower: 106.4, bandWidth: 7.6 },
-  { period: "W2 Mar", forecast: 111.8, lower: 107.4, bandWidth: 8.8 },
-  { period: "W3 Mar", forecast: 113.5, lower: 108.2, bandWidth: 10.6 },
-  { period: "W4 Mar", forecast: 114.2, lower: 108.4, bandWidth: 11.6 },
-  { period: "W1 Apr", forecast: 115.8, lower: 109.1, bandWidth: 13.4 },
-  { period: "W2 Apr", forecast: 116.4, lower: 108.8, bandWidth: 15.2 },
-  { period: "W3 Apr", forecast: 117.9, lower: 109.6, bandWidth: 16.6 },
-  { period: "W4 Apr", forecast: 118.5, lower: 109.2, bandWidth: 18.6 },
-];
-
-const FORECAST_EVENTS = [
-  { period: "W3 Jan", value: 99.8, label: "Supply disruption parsed" },
-  { period: "W2 Feb", value: 103.2, label: "Inventory signal changed" },
-];
-
-const FORECAST_METRICS = [
-  { label: "Forecast bias", value: "Bullish", color: C.green },
-  { label: "30-day signal change", value: "+4.8%", color: C.green },
-  { label: "Confidence", value: "78%", color: C.text },
-  { label: "Uncertainty band", value: "\u00B16.2%", color: C.amber },
-  { label: "Top driver", value: "Supply disruption", color: C.text },
-  { label: "Model mode", value: "Signal-adjusted", color: C.textMuted },
-];
+const DOMAIN_CHARTS: Record<DomainId, {
+  summaryMetrics: { label: string; value: string; color: string }[];
+  yDomain: [number, number];
+  chartData: Array<{ period: string; actual?: number; forecast?: number; lower?: number; bandWidth?: number }>;
+  events: { period: string; value: number; label: string }[];
+  metrics: { label: string; value: string; color: string }[];
+}> = {
+  mining: {
+    summaryMetrics: [
+      { label: "Forecast pressure", value: "Bullish", color: C.green },
+      { label: "Confidence", value: "81%", color: C.text },
+      { label: "Volatility risk", value: "Elevated", color: C.amber },
+      { label: "Horizon", value: "2\u20134 weeks", color: C.text },
+    ],
+    yDomain: [94, 132],
+    chartData: [
+      { period: "W1 Jan", actual: 100.0 },
+      { period: "W2 Jan", actual: 101.2 },
+      { period: "W3 Jan", actual: 99.8 },
+      { period: "W4 Jan", actual: 102.5 },
+      { period: "W1 Feb", actual: 104.1 },
+      { period: "W2 Feb", actual: 103.2 },
+      { period: "W3 Feb", actual: 105.8 },
+      { period: "W4 Feb", actual: 108.4, forecast: 108.4, lower: 108.4, bandWidth: 0 },
+      { period: "W1 Mar", forecast: 110.2, lower: 106.4, bandWidth: 7.6 },
+      { period: "W2 Mar", forecast: 111.8, lower: 107.4, bandWidth: 8.8 },
+      { period: "W3 Mar", forecast: 113.5, lower: 108.2, bandWidth: 10.6 },
+      { period: "W4 Mar", forecast: 114.2, lower: 108.4, bandWidth: 11.6 },
+      { period: "W1 Apr", forecast: 115.8, lower: 109.1, bandWidth: 13.4 },
+      { period: "W2 Apr", forecast: 116.4, lower: 108.8, bandWidth: 15.2 },
+      { period: "W3 Apr", forecast: 117.9, lower: 109.6, bandWidth: 16.6 },
+      { period: "W4 Apr", forecast: 118.5, lower: 109.2, bandWidth: 18.6 },
+    ],
+    events: [
+      { period: "W3 Jan", value: 99.8, label: "Supply disruption parsed" },
+      { period: "W2 Feb", value: 103.2, label: "Inventory signal changed" },
+    ],
+    metrics: [
+      { label: "Forecast bias", value: "Bullish", color: C.green },
+      { label: "30-day signal change", value: "+4.8%", color: C.green },
+      { label: "Confidence", value: "78%", color: C.text },
+      { label: "Uncertainty band", value: "\u00B16.2%", color: C.amber },
+      { label: "Top driver", value: "Supply disruption", color: C.text },
+      { label: "Model mode", value: "Signal-adjusted", color: C.textMuted },
+    ],
+  },
+  freight: {
+    summaryMetrics: [
+      { label: "Forecast pressure", value: "Firming", color: C.green },
+      { label: "Confidence", value: "74%", color: C.text },
+      { label: "Volatility risk", value: "High", color: C.red },
+      { label: "Horizon", value: "1\u20133 weeks", color: C.text },
+    ],
+    yDomain: [90, 134],
+    chartData: [
+      { period: "W1 Jan", actual: 100.0 },
+      { period: "W2 Jan", actual: 98.5 },
+      { period: "W3 Jan", actual: 101.8 },
+      { period: "W4 Jan", actual: 99.2 },
+      { period: "W1 Feb", actual: 103.5 },
+      { period: "W2 Feb", actual: 101.0 },
+      { period: "W3 Feb", actual: 104.2 },
+      { period: "W4 Feb", actual: 106.8, forecast: 106.8, lower: 106.8, bandWidth: 0 },
+      { period: "W1 Mar", forecast: 108.0, lower: 103.5, bandWidth: 9.0 },
+      { period: "W2 Mar", forecast: 109.5, lower: 103.8, bandWidth: 11.4 },
+      { period: "W3 Mar", forecast: 110.8, lower: 103.0, bandWidth: 15.6 },
+      { period: "W4 Mar", forecast: 111.2, lower: 102.5, bandWidth: 17.4 },
+      { period: "W1 Apr", forecast: 112.5, lower: 102.0, bandWidth: 21.0 },
+      { period: "W2 Apr", forecast: 113.0, lower: 101.2, bandWidth: 23.6 },
+      { period: "W3 Apr", forecast: 114.2, lower: 101.0, bandWidth: 26.4 },
+      { period: "W4 Apr", forecast: 114.8, lower: 100.5, bandWidth: 28.6 },
+    ],
+    events: [
+      { period: "W2 Jan", value: 98.5, label: "Port congestion alert" },
+      { period: "W3 Feb", value: 104.2, label: "Bunker fuel spike" },
+    ],
+    metrics: [
+      { label: "Forecast bias", value: "Firming", color: C.green },
+      { label: "30-day signal change", value: "+3.2%", color: C.green },
+      { label: "Confidence", value: "74%", color: C.text },
+      { label: "Uncertainty band", value: "\u00B19.4%", color: C.red },
+      { label: "Top driver", value: "Port congestion", color: C.text },
+      { label: "Model mode", value: "Signal-adjusted", color: C.textMuted },
+    ],
+  },
+  agriculture: {
+    summaryMetrics: [
+      { label: "Forecast pressure", value: "Mixed / Bullish", color: C.amber },
+      { label: "Confidence", value: "71%", color: C.text },
+      { label: "Volatility risk", value: "Moderate", color: C.amber },
+      { label: "Horizon", value: "3\u20136 weeks", color: C.text },
+    ],
+    yDomain: [92, 128],
+    chartData: [
+      { period: "W1 Jan", actual: 100.0 },
+      { period: "W2 Jan", actual: 100.8 },
+      { period: "W3 Jan", actual: 99.5 },
+      { period: "W4 Jan", actual: 98.2 },
+      { period: "W1 Feb", actual: 99.0 },
+      { period: "W2 Feb", actual: 101.5 },
+      { period: "W3 Feb", actual: 103.0 },
+      { period: "W4 Feb", actual: 104.5, forecast: 104.5, lower: 104.5, bandWidth: 0 },
+      { period: "W1 Mar", forecast: 106.0, lower: 102.8, bandWidth: 6.4 },
+      { period: "W2 Mar", forecast: 107.2, lower: 103.5, bandWidth: 7.4 },
+      { period: "W3 Mar", forecast: 108.0, lower: 103.0, bandWidth: 10.0 },
+      { period: "W4 Mar", forecast: 109.5, lower: 103.2, bandWidth: 12.6 },
+      { period: "W1 Apr", forecast: 110.8, lower: 103.0, bandWidth: 15.6 },
+      { period: "W2 Apr", forecast: 111.5, lower: 102.5, bandWidth: 18.0 },
+      { period: "W3 Apr", forecast: 112.0, lower: 102.0, bandWidth: 20.0 },
+      { period: "W4 Apr", forecast: 112.8, lower: 101.5, bandWidth: 22.6 },
+    ],
+    events: [
+      { period: "W3 Jan", value: 99.5, label: "Crop weather alert parsed" },
+      { period: "W2 Feb", value: 101.5, label: "Export inspection signal" },
+    ],
+    metrics: [
+      { label: "Forecast bias", value: "Mixed / Bullish", color: C.amber },
+      { label: "30-day signal change", value: "+2.1%", color: C.green },
+      { label: "Confidence", value: "71%", color: C.text },
+      { label: "Uncertainty band", value: "\u00B17.8%", color: C.amber },
+      { label: "Top driver", value: "Export demand", color: C.text },
+      { label: "Model mode", value: "Signal-adjusted", color: C.textMuted },
+    ],
+  },
+  custom: {
+    summaryMetrics: [
+      { label: "Forecast pressure", value: "Neutral", color: C.textMuted },
+      { label: "Confidence", value: "\u2014", color: C.textMuted },
+      { label: "Volatility risk", value: "Unknown", color: C.textMuted },
+      { label: "Horizon", value: "\u2014", color: C.textMuted },
+    ],
+    yDomain: [90, 116],
+    chartData: [
+      { period: "W1 Jan", actual: 100.0 },
+      { period: "W2 Jan", actual: 100.2 },
+      { period: "W3 Jan", actual: 99.8 },
+      { period: "W4 Jan", actual: 100.1 },
+      { period: "W1 Feb", actual: 100.3 },
+      { period: "W2 Feb", actual: 99.9 },
+      { period: "W3 Feb", actual: 100.4 },
+      { period: "W4 Feb", actual: 100.5, forecast: 100.5, lower: 100.5, bandWidth: 0 },
+      { period: "W1 Mar", forecast: 100.8, lower: 98.0, bandWidth: 5.6 },
+      { period: "W2 Mar", forecast: 101.0, lower: 97.5, bandWidth: 7.0 },
+      { period: "W3 Mar", forecast: 101.2, lower: 97.0, bandWidth: 8.4 },
+      { period: "W4 Mar", forecast: 101.5, lower: 96.5, bandWidth: 10.0 },
+      { period: "W1 Apr", forecast: 101.8, lower: 96.0, bandWidth: 11.6 },
+      { period: "W2 Apr", forecast: 102.0, lower: 95.5, bandWidth: 13.0 },
+      { period: "W3 Apr", forecast: 102.2, lower: 95.0, bandWidth: 14.4 },
+      { period: "W4 Apr", forecast: 102.5, lower: 94.5, bandWidth: 16.0 },
+    ],
+    events: [],
+    metrics: [
+      { label: "Forecast bias", value: "Neutral", color: C.textMuted },
+      { label: "30-day signal change", value: "\u2014", color: C.textMuted },
+      { label: "Confidence", value: "\u2014", color: C.textMuted },
+      { label: "Uncertainty band", value: "\u2014", color: C.textMuted },
+      { label: "Top driver", value: "Awaiting data", color: C.textMuted },
+      { label: "Model mode", value: "Unconfigured", color: C.textMuted },
+    ],
+  },
+};
 
 function ForecastChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ dataKey: string; value?: number; color?: string }>; label?: string }) {
   if (!active || !payload?.length) return null;
@@ -292,7 +458,9 @@ function ForecastChartTooltip({ active, payload, label }: { active?: boolean; pa
 
 // ── AddDomainModal ──────────────────────────────────────────────────────────
 
-function AddDomainModal({ onClose }: { onClose: () => void }) {
+function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name: string) => void }) {
+  const [name, setName] = useState("");
+
   return (
     <div
       onClick={onClose}
@@ -325,8 +493,23 @@ function AddDomainModal({ onClose }: { onClose: () => void }) {
           Configure a new market domain for signal collection and analysis.
         </p>
 
+        <div style={{ marginBottom: "14px" }}>
+          <label style={{ fontSize: "12px", color: C.textMuted, display: "block", marginBottom: "5px" }}>
+            Domain name
+          </label>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Energy — LNG spot rates"
+            style={{
+              width: "100%", padding: "9px 13px", background: C.inputBg,
+              border: `1px solid ${C.borderInput}`, borderRadius: "8px",
+              fontSize: "13px", color: C.text, outline: "none",
+              boxSizing: "border-box", fontFamily: "inherit",
+            }}
+          />
+        </div>
         {[
-          { label: "Domain name", placeholder: "e.g. Energy — LNG spot rates" },
           { label: "Key drivers", placeholder: "e.g. supply, demand, weather, FX" },
           { label: "Typical source types", placeholder: "e.g. URL, CSV, API, PDF" },
           { label: "Forecast horizon", placeholder: "e.g. 2–4 weeks" },
@@ -349,7 +532,7 @@ function AddDomainModal({ onClose }: { onClose: () => void }) {
 
         <div style={{ display: "flex", gap: "10px", marginTop: "22px" }}>
           <button
-            onClick={onClose}
+            onClick={() => { onAdd(name.trim() || "Custom market"); onClose(); }}
             style={{
               flex: 1, padding: "11px", background: C.green, color: "#fff",
               border: "none", borderRadius: "8px", fontSize: "13px",
@@ -373,17 +556,19 @@ function AddDomainModal({ onClose }: { onClose: () => void }) {
 // ── Screen 1: Signal Intake ────────────────────────────────────────────────
 
 function SignalIntake({
-  domain, setDomain, onGenerate, onAddDomain,
+  domain, setDomain, onGenerate, onAddDomain, customLabel,
 }: {
   domain: DomainId;
   setDomain: (d: DomainId) => void;
   onGenerate: () => void;
   onAddDomain: () => void;
+  customLabel: string;
 }) {
   const [dropOpen, setDropOpen] = useState(false);
   const [url, setUrl] = useState("");
   const [note, setNote] = useState("");
   const d = DOMAINS[domain];
+  const domainLabel = domain === "custom" && customLabel ? customLabel : d.label;
 
   return (
     <div>
@@ -406,7 +591,7 @@ function SignalIntake({
                   borderRadius: "8px", fontSize: "13px", color: C.text, cursor: "pointer",
                 }}
               >
-                <span>{d.label}</span>
+                <span>{domainLabel}</span>
                 <span style={{ color: C.textMuted, fontSize: "11px" }}>▾</span>
               </button>
               {dropOpen && (
@@ -420,7 +605,7 @@ function SignalIntake({
                     background: "#fff", border: `1px solid ${C.borderInput}`, borderRadius: "8px",
                     boxShadow: "0 6px 20px rgba(0,0,0,0.10)", zIndex: 50, overflow: "hidden",
                   }}>
-                    {(Object.keys(DOMAINS) as DomainId[]).map((id) => (
+                    {(Object.keys(DOMAINS) as DomainId[]).filter((id) => id !== "custom" || customLabel).map((id) => (
                       <button
                         key={id}
                         onClick={() => { setDomain(id); setDropOpen(false); }}
@@ -430,7 +615,7 @@ function SignalIntake({
                           color: id === domain ? C.green : C.text, border: "none", cursor: "pointer",
                         }}
                       >
-                        {DOMAINS[id].label}
+                        {id === "custom" && customLabel ? customLabel : DOMAINS[id].label}
                       </button>
                     ))}
                   </div>
@@ -560,18 +745,14 @@ function SignalIntake({
 
 function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenerate: () => void }) {
   const d = DOMAINS[domain];
+  const dc = DOMAIN_CHARTS[domain];
 
   return (
     <div>
 
       {/* Metric cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "12px", marginBottom: "18px" }}>
-        {[
-          { label: "Forecast pressure", value: "Bullish", color: C.green },
-          { label: "Confidence", value: "81%", color: C.text },
-          { label: "Volatility risk", value: "Elevated", color: C.amber },
-          { label: "Horizon", value: "2–4 weeks", color: C.text },
-        ].map((m) => (
+        {dc.summaryMetrics.map((m) => (
           <div key={m.label} style={{ ...card, padding: "12px 16px" }}>
             <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 4px" }}>{m.label}</p>
             <p style={{ fontSize: "18px", fontWeight: 700, color: m.color, margin: 0 }}>{m.value}</p>
@@ -666,7 +847,7 @@ function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenera
           </p>
           <div style={{ width: "100%", height: 320 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={FORECAST_CHART_DATA} margin={{ top: 20, right: 16, bottom: 4, left: 0 }}>
+              <ComposedChart data={dc.chartData} margin={{ top: 20, right: 16, bottom: 4, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
                 <XAxis
                   dataKey="period"
@@ -675,7 +856,7 @@ function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenera
                   tickLine={false}
                 />
                 <YAxis
-                  domain={[94, 132]}
+                  domain={dc.yDomain}
                   tick={{ fontSize: 11, fill: C.textFaint }}
                   axisLine={false}
                   tickLine={false}
@@ -742,7 +923,7 @@ function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenera
                 </ReferenceLine>
 
                 {/* Event markers */}
-                {FORECAST_EVENTS.map((evt) => (
+                {dc.events.map((evt) => (
                   <ReferenceDot
                     key={evt.period}
                     x={evt.period}
@@ -778,10 +959,10 @@ function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenera
           <h4 style={{ fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 16px" }}>
             Forecast metrics
           </h4>
-          {FORECAST_METRICS.map((m, i) => (
+          {dc.metrics.map((m, i) => (
             <div key={m.label} style={{
               padding: "10px 0",
-              borderBottom: i < FORECAST_METRICS.length - 1 ? `1px solid ${C.borderSub}` : "none",
+              borderBottom: i < dc.metrics.length - 1 ? `1px solid ${C.borderSub}` : "none",
             }}>
               <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 3px" }}>{m.label}</p>
               <p style={{ fontSize: "14px", fontWeight: 600, color: m.color, margin: 0 }}>{m.value}</p>
@@ -936,6 +1117,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("intake");
   const [domain, setDomain] = useState<DomainId>("mining");
   const [modal, setModal] = useState(false);
+  const [customLabel, setCustomLabel] = useState("");
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "Inter, -apple-system, sans-serif" }}>
@@ -978,6 +1160,7 @@ export default function App() {
             setDomain={setDomain}
             onGenerate={() => setTab("intelligence")}
             onAddDomain={() => setModal(true)}
+            customLabel={customLabel}
           />
         )}
         {tab === "intelligence" && (
@@ -986,7 +1169,7 @@ export default function App() {
         {tab === "forecast" && <ForecastDecisionPack domain={domain} />}
       </main>
 
-      {modal && <AddDomainModal onClose={() => setModal(false)} />}
+      {modal && <AddDomainModal onClose={() => setModal(false)} onAdd={(name) => { setCustomLabel(name); setDomain("custom"); }} />}
     </div>
   );
 }
