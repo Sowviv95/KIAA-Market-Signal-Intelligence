@@ -25,6 +25,22 @@ interface ParsedSource {
   quality: string;
 }
 
+type FileExtension = "txt" | "csv" | "json" | "unsupported";
+
+interface UploadedSource {
+  id: string;
+  name: string;
+  extension: FileExtension;
+  status: "parsed" | "warning" | "error";
+  detectedDomain?: string;
+  sourceCategory?: string;
+  rowCount?: number;
+  columnCount?: number;
+  columns?: string[];
+  preview: string;
+  message?: string;
+}
+
 // ── Domain data ────────────────────────────────────────────────────────────
 
 const DOMAINS: Record<DomainId, {
@@ -581,6 +597,135 @@ function parseMarketInput(domain: DomainId, url: string, note: string): ParsedRe
   };
 }
 
+// ── File upload helpers ────────────────────────────────────────────────────
+
+const ACCEPTED_EXTENSIONS: FileExtension[] = ["txt", "csv", "json"];
+
+function getFileExtension(name: string): FileExtension {
+  const ext = name.split(".").pop()?.toLowerCase();
+  if (ext === "txt") return "txt";
+  if (ext === "csv") return "csv";
+  if (ext === "json") return "json";
+  return "unsupported";
+}
+
+const DOMAIN_FILE_HINTS: Record<string, string> = {
+  freight: "freight|shipping|port|fuel|bunker|rate|vessel|congestion|route|bdi|baltic",
+  mining: "mining|copper|lithium|nickel|inventory|mine|metal|smelter|production|shipment",
+  agriculture: "agriculture|agri|crop|weather|grain|export|stock|rainfall|yield|harvest|drought",
+};
+
+function detectDomainFromName(name: string): string | undefined {
+  const lower = name.toLowerCase();
+  for (const [domain, pattern] of Object.entries(DOMAIN_FILE_HINTS)) {
+    if (new RegExp(pattern).test(lower)) return domain;
+  }
+  return undefined;
+}
+
+function detectDomainFromColumns(cols: string[]): string | undefined {
+  const joined = cols.join(" ").toLowerCase();
+  for (const [domain, pattern] of Object.entries(DOMAIN_FILE_HINTS)) {
+    if (new RegExp(pattern).test(joined)) return domain;
+  }
+  return undefined;
+}
+
+function detectSourceCategory(ext: FileExtension, content: string): string {
+  if (ext === "csv") return "Structured data source";
+  if (ext === "json") return "Source metadata / notes";
+  const lower = content.toLowerCase().slice(0, 500);
+  if (lower.includes("analyst") || lower.includes("recommendation") || lower.includes("outlook")) return "Analyst note";
+  if (lower.includes("source") || lower.includes("reference") || lower.includes("origin")) return "Source note";
+  return "Market note";
+}
+
+function parseCsvSimple(text: string): { headers: string[]; rows: string[][]; rowCount: number } {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length === 0) return { headers: [], rows: [], rowCount: 0 };
+  const headers = lines[0].split(",").map((h) => h.trim().replace(/^"|"$/g, ""));
+  const rows = lines.slice(1).map((line) => line.split(",").map((c) => c.trim().replace(/^"|"$/g, "")));
+  return { headers, rows, rowCount: rows.length };
+}
+
+async function parseUploadedFile(file: File): Promise<UploadedSource> {
+  const ext = getFileExtension(file.name);
+  const id = `${file.name}-${Date.now()}`;
+
+  if (ext === "unsupported") {
+    return {
+      id, name: file.name, extension: ext, status: "warning",
+      preview: "", message: `Unsupported file type. Accepted formats: .txt, .csv, .json`,
+    };
+  }
+
+  let content: string;
+  try {
+    content = await file.text();
+  } catch {
+    return {
+      id, name: file.name, extension: ext, status: "error",
+      preview: "", message: "Failed to read file",
+    };
+  }
+
+  const detectedDomain = detectDomainFromName(file.name);
+
+  if (ext === "txt") {
+    const snippet = content.trim().slice(0, 300);
+    const category = detectSourceCategory(ext, content);
+    return {
+      id, name: file.name, extension: ext, status: "parsed",
+      detectedDomain, sourceCategory: category,
+      preview: snippet + (content.length > 300 ? "..." : ""),
+      message: "Local demo file parsed in browser",
+    };
+  }
+
+  if (ext === "csv") {
+    const { headers, rows, rowCount } = parseCsvSimple(content);
+    if (headers.length === 0) {
+      return {
+        id, name: file.name, extension: ext, status: "warning",
+        preview: "", message: "CSV file appears empty",
+      };
+    }
+    const domain = detectedDomain || detectDomainFromColumns(headers);
+    const previewRows = rows.slice(0, 3).map((r) => r.join(" | ")).join("\n");
+    return {
+      id, name: file.name, extension: ext, status: "parsed",
+      detectedDomain: domain, sourceCategory: "Structured data source",
+      rowCount, columnCount: headers.length, columns: headers,
+      preview: headers.join(" | ") + "\n" + previewRows,
+      message: `CSV headers detected. ${rowCount} rows, ${headers.length} columns`,
+    };
+  }
+
+  // JSON
+  try {
+    const parsed = JSON.parse(content);
+    const topKeys = Object.keys(parsed).slice(0, 10);
+    let preview = `Top-level keys: ${topKeys.join(", ")}`;
+    let extra = "";
+    if (Array.isArray(parsed.sources)) {
+      const names = parsed.sources.slice(0, 5).map((s: Record<string, unknown>) => s.name || s.title || "(unnamed)");
+      extra = `\n${parsed.sources.length} sources: ${names.join(", ")}`;
+    }
+    return {
+      id, name: file.name, extension: ext, status: "parsed",
+      detectedDomain, sourceCategory: detectSourceCategory(ext, content),
+      preview: preview + extra,
+      message: "JSON parsed successfully",
+    };
+  } catch {
+    return {
+      id, name: file.name, extension: ext, status: "warning",
+      preview: content.slice(0, 200),
+      message: "Invalid JSON — could not parse",
+    };
+  }
+}
+
 // ── AddDomainModal ──────────────────────────────────────────────────────────
 
 function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name: string) => void }) {
@@ -682,6 +827,7 @@ function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name:
 
 function SignalIntake({
   domain, setDomain, onGenerate, onAddDomain, customLabel, parsedResult,
+  uploadedFiles, onFilesUploaded,
 }: {
   domain: DomainId;
   setDomain: (d: DomainId) => void;
@@ -689,11 +835,31 @@ function SignalIntake({
   onAddDomain: () => void;
   customLabel: string;
   parsedResult: ParsedResult | null;
+  uploadedFiles: UploadedSource[];
+  onFilesUploaded: (files: UploadedSource[], txtContent: string | null) => void;
 }) {
   const [dropOpen, setDropOpen] = useState(false);
   const [url, setUrl] = useState("");
   const [note, setNote] = useState("");
   const d = DOMAINS[domain];
+
+  const handleFiles = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const results: UploadedSource[] = [];
+    let txtContent: string | null = null;
+    for (let i = 0; i < fileList.length; i++) {
+      const parsed = await parseUploadedFile(fileList[i]);
+      results.push(parsed);
+      if (parsed.extension === "txt" && parsed.status === "parsed") {
+        const content = await fileList[i].text();
+        txtContent = txtContent ? txtContent + "\n\n" + content : content;
+      }
+    }
+    onFilesUploaded(results, txtContent);
+    if (txtContent) {
+      setNote((prev) => prev ? prev + "\n\n" + txtContent : txtContent!);
+    }
+  };
   const domainLabel = domain === "custom" && customLabel ? customLabel : d.label;
 
   return (
@@ -774,17 +940,90 @@ function SignalIntake({
 
           <div style={{ marginTop: "22px" }}>
             <label style={{ fontSize: "12px", color: C.textMuted, display: "block", marginBottom: "7px" }}>
-              Upload or select sample data
+              Upload local demo files
             </label>
-            <div style={{
-              border: `1.5px dashed rgba(0,0,0,0.14)`, borderRadius: "8px",
-              padding: "28px 20px", textAlign: "center", background: "#fafafa",
-            }}>
+            <div
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleFiles(e.dataTransfer.files); }}
+              style={{
+                border: `1.5px dashed rgba(0,0,0,0.14)`, borderRadius: "8px",
+                padding: "22px 20px", textAlign: "center", background: "#fafafa",
+                cursor: "pointer", position: "relative",
+              }}
+              onClick={() => document.getElementById("file-upload-input")?.click()}
+            >
+              <input
+                id="file-upload-input"
+                type="file"
+                multiple
+                accept=".txt,.csv,.json"
+                style={{ display: "none" }}
+                onChange={(e) => { handleFiles(e.target.files); e.target.value = ""; }}
+              />
               <p style={{ fontSize: "13px", color: C.textSec, margin: "0 0 4px" }}>
-                Drop CSV / Excel / PDF / TXT files here
+                Drop .txt, .csv, or .json files here, or click to browse
               </p>
-              <p style={{ fontSize: "12px", color: C.textFaint, margin: 0 }}>Visual placeholder — use the note field below for demo parsing</p>
+              <p style={{ fontSize: "12px", color: C.textFaint, margin: 0 }}>Files are read locally in the browser — nothing is uploaded</p>
             </div>
+
+            {uploadedFiles.length > 0 && (
+              <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                {uploadedFiles.map((uf) => (
+                  <div key={uf.id} style={{
+                    padding: "10px 13px", background: uf.status === "parsed" ? "#fafafa" : "rgba(217,119,6,0.06)",
+                    border: `1px solid ${uf.status === "parsed" ? C.borderSub : "rgba(217,119,6,0.2)"}`,
+                    borderRadius: "8px",
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                      <span style={{ fontSize: "13px", fontWeight: 500, color: C.text }}>{uf.name}</span>
+                      <div style={{ display: "flex", gap: "5px" }}>
+                        <span style={{
+                          padding: "2px 7px", borderRadius: "4px", fontSize: "10px", fontWeight: 500,
+                          background: uf.status === "parsed" ? "rgba(22,163,74,0.10)" : "rgba(217,119,6,0.10)",
+                          color: uf.status === "parsed" ? C.green : C.amber,
+                        }}>{uf.status === "parsed" ? "Parsed" : uf.status === "warning" ? "Warning" : "Error"}</span>
+                        <span style={{
+                          padding: "2px 7px", borderRadius: "4px", fontSize: "10px",
+                          background: "#f3f4f6", color: C.textMuted,
+                        }}>.{uf.extension}</span>
+                      </div>
+                    </div>
+                    {uf.detectedDomain && (
+                      <p style={{ fontSize: "11px", color: C.green, margin: "0 0 2px" }}>
+                        Domain: {uf.detectedDomain}
+                      </p>
+                    )}
+                    {uf.sourceCategory && (
+                      <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 2px" }}>{uf.sourceCategory}</p>
+                    )}
+                    {uf.columns && (
+                      <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 2px" }}>
+                        Columns: {uf.columns.join(", ")}
+                      </p>
+                    )}
+                    {(uf.rowCount !== undefined || uf.columnCount !== undefined) && (
+                      <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 2px" }}>
+                        {uf.rowCount !== undefined ? `${uf.rowCount} rows` : ""}{uf.rowCount !== undefined && uf.columnCount !== undefined ? " / " : ""}{uf.columnCount !== undefined ? `${uf.columnCount} columns` : ""}
+                      </p>
+                    )}
+                    {uf.preview && (
+                      <pre style={{
+                        fontSize: "11px", color: C.textSec, margin: "4px 0 0",
+                        whiteSpace: "pre-wrap", wordBreak: "break-word",
+                        background: "#fff", padding: "6px 8px", borderRadius: "4px",
+                        border: `1px solid ${C.borderSub}`, maxHeight: "80px", overflow: "auto",
+                        fontFamily: "monospace",
+                      }}>{uf.preview}</pre>
+                    )}
+                    {uf.message && (
+                      <p style={{ fontSize: "11px", color: uf.status === "parsed" ? C.green : C.amber, margin: "4px 0 0" }}>
+                        {uf.message}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div style={{ marginTop: "22px" }}>
@@ -898,6 +1137,29 @@ function SignalIntake({
                 ))}
               </div>
             </>
+          )}
+
+          {uploadedFiles.length > 0 && (
+            <div style={{ marginTop: "14px", display: "flex", flexDirection: "column", gap: "4px" }}>
+              <p style={{ fontSize: "11px", fontWeight: 500, color: C.textMuted, margin: "0 0 2px" }}>Upload status</p>
+              {uploadedFiles.map((uf) => {
+                const statusText = uf.extension === "txt" ? "Local file accepted — content added to note field"
+                  : uf.extension === "csv" ? `CSV headers detected — ${uf.rowCount} rows, ${uf.columnCount} columns`
+                  : uf.extension === "json" ? "JSON parsed — source preview prepared"
+                  : "Unsupported file type";
+                const isOk = uf.status === "parsed";
+                return (
+                  <div key={uf.id} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "11px", color: isOk ? C.green : C.amber }}>{isOk ? "\u2713" : "\u26A0"}</span>
+                    <span style={{ fontSize: "11px", color: C.textSec }}>{uf.name}: {statusText}</span>
+                  </div>
+                );
+              })}
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "2px" }}>
+                <span style={{ fontSize: "11px", color: C.green }}>{"\u2713"}</span>
+                <span style={{ fontSize: "11px", color: C.green, fontWeight: 500 }}>Ready for signal generation</span>
+              </div>
+            </div>
           )}
 
           <button
@@ -1352,8 +1614,9 @@ export default function App() {
   const [modal, setModal] = useState(false);
   const [customLabel, setCustomLabel] = useState("");
   const [parsedResult, setParsedResult] = useState<ParsedResult | null>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedSource[]>([]);
 
-  const handleSetDomain = (d: DomainId) => { setDomain(d); setParsedResult(null); };
+  const handleSetDomain = (d: DomainId) => { setDomain(d); setParsedResult(null); setUploadedFiles([]); };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "Inter, -apple-system, sans-serif" }}>
@@ -1398,6 +1661,8 @@ export default function App() {
             onAddDomain={() => setModal(true)}
             customLabel={customLabel}
             parsedResult={parsedResult}
+            uploadedFiles={uploadedFiles}
+            onFilesUploaded={(files, _txtContent) => setUploadedFiles((prev) => [...prev, ...files])}
           />
         )}
         {tab === "intelligence" && (

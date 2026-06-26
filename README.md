@@ -12,6 +12,16 @@ This is a **frontend-only deterministic demo**. There is no backend, no API keys
 
 Supported domains: Mining commodities, Freight / shipping rates, Agriculture commodities, and custom user-defined domains.
 
+### Local file upload (Sprint 5A)
+
+The file upload area accepts local `.txt`, `.csv`, and `.json` files:
+
+- **TXT** — content is added to the market note field for signal generation via the existing parser
+- **CSV** — headers, row/column counts, and sample rows are previewed; signal extraction from CSVs is planned for a future sprint
+- **JSON** — top-level keys and source metadata are previewed
+
+All files are read in-browser using the File API. No files leave the browser and nothing is uploaded to a server.
+
 ## What is intentionally not included
 
 - No backend or server
