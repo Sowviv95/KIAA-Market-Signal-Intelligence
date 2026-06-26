@@ -456,6 +456,132 @@ function ForecastChartTooltip({ active, payload, label }: { active?: boolean; pa
   );
 }
 
+// ── Deterministic parser ──────────────────────────────────────────────────
+
+interface ParsedSignal {
+  label: string;
+  direction: string;
+  directionColor: string;
+  strength: number;
+  confidence: number;
+  evidence: string;
+}
+
+interface ParsedResult {
+  sourceType: string;
+  extractedSignals: ParsedSignal[];
+  parsedEntities: string[];
+  forecastImpact: string;
+  confidence: number;
+  statusSteps: string[];
+  reasoning: string;
+  urlSource: string | null;
+  noteSnippet: string | null;
+}
+
+const DIR_COLOR: Record<string, string> = { Bullish: "#16a34a", Bearish: "#dc2626", Watch: "#d97706" };
+
+const DOMAIN_KEYWORDS: Record<DomainId, { keyword: string; signal: string; direction: string; strength: number; confidence: number }[]> = {
+  mining: [
+    { keyword: "supply disruption", signal: "Supply disruption", direction: "Bullish", strength: 84, confidence: 82 },
+    { keyword: "mine outage", signal: "Mine output disruption", direction: "Bullish", strength: 80, confidence: 78 },
+    { keyword: "smelter", signal: "Smelter demand pressure", direction: "Bullish", strength: 72, confidence: 74 },
+    { keyword: "inventory", signal: "Inventory drawdown", direction: "Bullish", strength: 78, confidence: 80 },
+    { keyword: "copper", signal: "Copper market signal", direction: "Bullish", strength: 70, confidence: 72 },
+    { keyword: "lithium", signal: "Lithium market signal", direction: "Bullish", strength: 68, confidence: 70 },
+    { keyword: "nickel", signal: "Nickel market signal", direction: "Bullish", strength: 66, confidence: 68 },
+    { keyword: "shipment delay", signal: "Logistics disruption", direction: "Bullish", strength: 74, confidence: 76 },
+    { keyword: "export restriction", signal: "Trade restriction risk", direction: "Watch", strength: 60, confidence: 65 },
+  ],
+  freight: [
+    { keyword: "port congestion", signal: "Port congestion pressure", direction: "Bullish", strength: 82, confidence: 80 },
+    { keyword: "vessel", signal: "Vessel tightness", direction: "Bullish", strength: 78, confidence: 76 },
+    { keyword: "bunker fuel", signal: "Bunker fuel cost pressure", direction: "Bullish", strength: 74, confidence: 72 },
+    { keyword: "route rate", signal: "Route rate signal", direction: "Bullish", strength: 76, confidence: 74 },
+    { keyword: "spot rate", signal: "Spot rate upward signal", direction: "Bullish", strength: 80, confidence: 78 },
+    { keyword: "container", signal: "Container scarcity", direction: "Bullish", strength: 72, confidence: 70 },
+    { keyword: "blank sailing", signal: "Blank sailings pressure", direction: "Bullish", strength: 70, confidence: 68 },
+    { keyword: "transit delay", signal: "Transit delay impact", direction: "Bullish", strength: 68, confidence: 66 },
+  ],
+  agriculture: [
+    { keyword: "adverse weather", signal: "Weather risk pressure", direction: "Bullish", strength: 76, confidence: 72 },
+    { keyword: "rainfall deficit", signal: "Rainfall deficit signal", direction: "Bullish", strength: 78, confidence: 74 },
+    { keyword: "drought", signal: "Drought risk elevated", direction: "Bullish", strength: 80, confidence: 76 },
+    { keyword: "crop condition", signal: "Crop condition stress", direction: "Bullish", strength: 74, confidence: 72 },
+    { keyword: "export inspection", signal: "Export demand confirmed", direction: "Bullish", strength: 72, confidence: 78 },
+    { keyword: "planting progress", signal: "Planting progress signal", direction: "Watch", strength: 60, confidence: 65 },
+    { keyword: "stock-to-use", signal: "Stock-to-use tightening", direction: "Bullish", strength: 76, confidence: 74 },
+    { keyword: "yield risk", signal: "Yield risk elevated", direction: "Bullish", strength: 74, confidence: 70 },
+  ],
+  custom: [
+    { keyword: "shortage", signal: "Shortage signal", direction: "Bullish", strength: 70, confidence: 65 },
+    { keyword: "demand increase", signal: "Demand pressure", direction: "Bullish", strength: 68, confidence: 63 },
+    { keyword: "supply delay", signal: "Supply delay impact", direction: "Bullish", strength: 66, confidence: 62 },
+    { keyword: "price rise", signal: "Price upward pressure", direction: "Bullish", strength: 64, confidence: 60 },
+    { keyword: "inventory change", signal: "Inventory signal", direction: "Watch", strength: 58, confidence: 58 },
+    { keyword: "volatility", signal: "Volatility signal", direction: "Watch", strength: 55, confidence: 55 },
+  ],
+};
+
+function parseMarketInput(domain: DomainId, url: string, note: string): ParsedResult {
+  const text = (url + " " + note).toLowerCase();
+  const keywords = DOMAIN_KEYWORDS[domain];
+  const matched = keywords.filter((k) => text.includes(k.keyword));
+
+  // Infer source type
+  let sourceType = "Market note";
+  if (url) {
+    const u = url.toLowerCase();
+    if (u.includes("port") || u.includes("shipping") || u.includes("freight") || u.includes("bunker")) sourceType = "Freight intelligence URL";
+    else if (u.includes("mine") || u.includes("metal") || u.includes("copper") || u.includes("lithium") || u.includes("inventory")) sourceType = "Mining intelligence URL";
+    else if (u.includes("crop") || u.includes("weather") || u.includes("agri") || u.includes("grain") || u.includes("export")) sourceType = "Agriculture intelligence URL";
+    else sourceType = "External source URL";
+  } else if (note) {
+    sourceType = domain === "mining" ? "Analyst market note" : domain === "freight" ? "Route intelligence note" : domain === "agriculture" ? "Crop market note" : "Custom market note";
+  }
+
+  const hasMatches = matched.length > 0;
+  const signals: ParsedSignal[] = hasMatches
+    ? matched.map((m) => ({
+        label: m.signal,
+        direction: m.direction,
+        directionColor: DIR_COLOR[m.direction] || "#6b7280",
+        strength: m.strength,
+        confidence: m.confidence,
+        evidence: `Keyword "${m.keyword}" detected in ${note ? "pasted note" : "URL"}`,
+      }))
+    : [{ label: "General market signal", direction: "Watch", directionColor: "#d97706", strength: 50, confidence: 55, evidence: "No specific keywords matched \u2014 generic signal applied" }];
+
+  const entities = hasMatches ? matched.map((m) => m.keyword) : ["general market"];
+  const avgConf = Math.round(signals.reduce((a, s) => a + s.confidence, 0) / signals.length);
+  const bullishCount = signals.filter((s) => s.direction === "Bullish").length;
+  const forecastImpact = bullishCount > signals.length / 2 ? "Upward pressure" : bullishCount === 0 ? "Neutral" : "Mixed with upward skew";
+
+  const entityList = entities.join(", ");
+  const dirWord = forecastImpact === "Upward pressure" ? "upside risk" : forecastImpact === "Neutral" ? "neutral impact" : "mixed directional impact";
+  const domLabel = DOMAINS[domain].label.toLowerCase();
+  const confWord = avgConf >= 75 ? "moderate-high" : avgConf >= 60 ? "moderate" : "low";
+  const reasoning = `The parsed ${note ? "note" : "source"} indicates ${entityList}, creating near-term ${dirWord} to ${domLabel}. Confidence is ${confWord} because ${signals.length} independent directional indicator${signals.length !== 1 ? "s" : ""} ${signals.length !== 1 ? "point" : "points"} in ${bullishCount > signals.length / 2 ? "the same direction" : "mixed directions"}${avgConf >= 70 ? ", but the uncertainty band remains manageable." : ", and the uncertainty band remains wide."}`;
+
+  return {
+    sourceType,
+    extractedSignals: signals,
+    parsedEntities: entities,
+    forecastImpact,
+    confidence: avgConf,
+    statusSteps: [
+      "Source accepted",
+      `${entities.length} market entities detected`,
+      "Directional signals extracted",
+      "Forecast-ready features prepared",
+      "Decision pack refreshed",
+    ],
+    reasoning,
+    urlSource: url || null,
+    noteSnippet: note ? (note.length > 120 ? note.slice(0, 117) + "..." : note) : null,
+  };
+}
+
 // ── AddDomainModal ──────────────────────────────────────────────────────────
 
 function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name: string) => void }) {
@@ -556,13 +682,14 @@ function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name:
 // ── Screen 1: Signal Intake ────────────────────────────────────────────────
 
 function SignalIntake({
-  domain, setDomain, onGenerate, onAddDomain, customLabel,
+  domain, setDomain, onGenerate, onAddDomain, customLabel, parsedResult,
 }: {
   domain: DomainId;
   setDomain: (d: DomainId) => void;
-  onGenerate: () => void;
+  onGenerate: (url: string, note: string) => void;
   onAddDomain: () => void;
   customLabel: string;
+  parsedResult: ParsedResult | null;
 }) {
   const [dropOpen, setDropOpen] = useState(false);
   const [url, setUrl] = useState("");
@@ -685,50 +812,97 @@ function SignalIntake({
           <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: "0 0 12px" }}>
             Parsed source preview
           </h3>
-          <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: "18px" }}>
-            {[
-              { text: `${d.parsedSources.length} sources parsed`, green: true },
-              { text: "92% readiness", green: false },
-              { text: "3 gaps fixed", green: false },
-            ].map((chip) => (
-              <span key={chip.text} style={{
-                padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: chip.green ? 500 : 400,
-                background: chip.green ? C.greenSubtle : "#f3f4f6",
-                border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
-                color: chip.green ? C.green : C.textSec,
-              }}>{chip.text}</span>
-            ))}
-          </div>
 
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "8px" }}>
-            {d.parsedSources.map((src, i) => (
-              <div key={i} style={{
-                padding: "11px 13px", background: "#fafafa",
-                border: `1px solid ${C.borderSub}`, borderRadius: "8px",
-                display: "flex", alignItems: "center", justifyContent: "space-between",
-              }}>
-                <div>
-                  <p style={{ fontSize: "13px", fontWeight: 500, color: C.text, margin: 0 }}>{src.name}</p>
-                  <p style={{ fontSize: "11px", color: C.textFaint, margin: "2px 0 0" }}>{src.type}</p>
-                </div>
-                <div style={{ display: "flex", gap: "6px" }}>
-                  <span style={{
-                    padding: "3px 8px", background: "#f3f4f6", borderRadius: "4px",
-                    fontSize: "11px", color: C.textSec,
-                  }}>{src.status}</span>
-                  <span style={{
-                    padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
-                    background: src.quality === "High" ? "rgba(22,163,74,0.10)" : "#f3f4f6",
-                    color: src.quality === "High" ? C.green : C.textMuted,
-                    fontWeight: src.quality === "High" ? 500 : 400,
-                  }}>{src.quality}</span>
-                </div>
+          {parsedResult ? (
+            <>
+              <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: "14px" }}>
+                {[
+                  { text: parsedResult.sourceType, green: true },
+                  { text: `${parsedResult.parsedEntities.length} entities`, green: false },
+                  { text: `${parsedResult.confidence}% confidence`, green: true },
+                ].map((chip) => (
+                  <span key={chip.text} style={{
+                    padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: chip.green ? 500 : 400,
+                    background: chip.green ? C.greenSubtle : "#f3f4f6",
+                    border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
+                    color: chip.green ? C.green : C.textSec,
+                  }}>{chip.text}</span>
+                ))}
               </div>
-            ))}
-          </div>
+
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "6px" }}>
+                {parsedResult.extractedSignals.map((sig, i) => (
+                  <div key={i} style={{
+                    padding: "10px 13px", background: "#fafafa",
+                    border: `1px solid ${C.borderSub}`, borderRadius: "8px",
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "3px" }}>
+                      <span style={{ fontSize: "13px", fontWeight: 500, color: C.text }}>{sig.label}</span>
+                      <span style={{ fontSize: "11px", fontWeight: 500, color: sig.directionColor }}>{sig.direction}</span>
+                    </div>
+                    <p style={{ fontSize: "11px", color: C.textFaint, margin: 0 }}>{sig.evidence}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ marginTop: "14px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                <p style={{ fontSize: "11px", fontWeight: 500, color: C.textMuted, margin: "0 0 2px" }}>Extraction status</p>
+                {parsedResult.statusSteps.map((step) => (
+                  <div key={step} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "11px", color: C.green }}>&#10003;</span>
+                    <span style={{ fontSize: "11px", color: C.textSec }}>{step}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: "18px" }}>
+                {[
+                  { text: `${d.parsedSources.length} sources parsed`, green: true },
+                  { text: "92% readiness", green: false },
+                  { text: "3 gaps fixed", green: false },
+                ].map((chip) => (
+                  <span key={chip.text} style={{
+                    padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: chip.green ? 500 : 400,
+                    background: chip.green ? C.greenSubtle : "#f3f4f6",
+                    border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
+                    color: chip.green ? C.green : C.textSec,
+                  }}>{chip.text}</span>
+                ))}
+              </div>
+
+              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "8px" }}>
+                {d.parsedSources.map((src, i) => (
+                  <div key={i} style={{
+                    padding: "11px 13px", background: "#fafafa",
+                    border: `1px solid ${C.borderSub}`, borderRadius: "8px",
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                  }}>
+                    <div>
+                      <p style={{ fontSize: "13px", fontWeight: 500, color: C.text, margin: 0 }}>{src.name}</p>
+                      <p style={{ fontSize: "11px", color: C.textFaint, margin: "2px 0 0" }}>{src.type}</p>
+                    </div>
+                    <div style={{ display: "flex", gap: "6px" }}>
+                      <span style={{
+                        padding: "3px 8px", background: "#f3f4f6", borderRadius: "4px",
+                        fontSize: "11px", color: C.textSec,
+                      }}>{src.status}</span>
+                      <span style={{
+                        padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
+                        background: src.quality === "High" ? "rgba(22,163,74,0.10)" : "#f3f4f6",
+                        color: src.quality === "High" ? C.green : C.textMuted,
+                        fontWeight: src.quality === "High" ? 500 : 400,
+                      }}>{src.quality}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
 
           <button
-            onClick={onGenerate}
+            onClick={() => onGenerate(url, note)}
             style={{
               marginTop: "18px", width: "100%", padding: "12px",
               background: C.green, color: "#fff", border: "none",
@@ -743,7 +917,7 @@ function SignalIntake({
 
 // ── Screen 2: Signal Intelligence ──────────────────────────────────────────
 
-function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenerate: () => void }) {
+function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: DomainId; onGenerate: () => void; parsedResult: ParsedResult | null }) {
   const d = DOMAINS[domain];
   const dc = DOMAIN_CHARTS[domain];
 
@@ -835,6 +1009,47 @@ function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenera
           >Generate forecast decision pack</button>
         </div>
       </div>
+
+      {/* Latest parsed intelligence */}
+      {parsedResult && (
+        <div style={{ ...card, marginTop: "18px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+            <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: 0 }}>
+              Latest parsed intelligence
+            </h3>
+            <span style={{
+              padding: "3px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: 500,
+              background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, color: C.green,
+            }}>Demo parsing</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "18px" }}>
+            <div>
+              <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 4px" }}>Source type</p>
+              <p style={{ fontSize: "13px", color: C.text, fontWeight: 500, margin: "0 0 12px" }}>{parsedResult.sourceType}</p>
+              <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 4px" }}>Parsed entities</p>
+              <div style={{ display: "flex", gap: "5px", flexWrap: "wrap", marginBottom: "12px" }}>
+                {parsedResult.parsedEntities.map((e) => (
+                  <span key={e} style={{
+                    padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
+                    background: "#f3f4f6", color: C.textSec,
+                  }}>{e}</span>
+                ))}
+              </div>
+              <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 4px" }}>Forecast impact</p>
+              <p style={{ fontSize: "13px", color: parsedResult.forecastImpact === "Upward pressure" ? C.green : C.amber, fontWeight: 500, margin: 0 }}>
+                {parsedResult.forecastImpact} &middot; {parsedResult.confidence}% confidence
+              </p>
+            </div>
+            <div style={{
+              background: "rgba(22,163,74,0.04)", border: `1px solid rgba(22,163,74,0.12)`,
+              borderRadius: "9px", padding: "14px",
+            }}>
+              <p style={{ fontSize: "12px", fontWeight: 600, color: C.green, margin: "0 0 6px" }}>Analyst reasoning</p>
+              <p style={{ fontSize: "12px", color: C.textSec, margin: 0, lineHeight: 1.65 }}>{parsedResult.reasoning}</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Signal-Adjusted Forecast chart */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 240px", gap: "18px", marginTop: "18px" }}>
@@ -988,8 +1203,27 @@ function SignalIntelligence({ domain, onGenerate }: { domain: DomainId; onGenera
 
 // ── Screen 3: Forecast Decision Pack ──────────────────────────────────────
 
-function ForecastDecisionPack({ domain }: { domain: DomainId }) {
+function ForecastDecisionPack({ domain, parsedResult }: { domain: DomainId; parsedResult: ParsedResult | null }) {
   const b = DOMAINS[domain].brief;
+  const allFeatures = parsedResult
+    ? [
+        ...b.features,
+        ...parsedResult.extractedSignals.slice(0, 3).map((s) => ({
+          name: s.label.toLowerCase().replace(/ /g, "_"),
+          value: +(s.strength / 100).toFixed(2),
+          direction: s.direction,
+          directionColor: s.directionColor,
+          source: "Note",
+        })),
+      ]
+    : b.features;
+  const allEvidence = parsedResult
+    ? [
+        ...b.evidence,
+        ...(parsedResult.noteSnippet ? [`Parsed note: ${parsedResult.noteSnippet}`] : []),
+        ...(parsedResult.urlSource ? [`URL source: ${parsedResult.urlSource}`] : []),
+      ]
+    : b.evidence;
 
   return (
     <div>
@@ -1066,11 +1300,11 @@ function ForecastDecisionPack({ domain }: { domain: DomainId }) {
                 <span key={h} style={{ fontSize: "11px", color: C.textFaint, fontWeight: 500 }}>{h}</span>
               ))}
             </div>
-            {b.features.map((f, i) => (
+            {allFeatures.map((f, i) => (
               <div key={i} style={{
                 display: "grid", gridTemplateColumns: "1fr 55px 70px 50px",
                 alignItems: "center", padding: "9px 0",
-                borderBottom: i < b.features.length - 1 ? `1px solid rgba(0,0,0,0.04)` : "none",
+                borderBottom: i < allFeatures.length - 1 ? `1px solid rgba(0,0,0,0.04)` : "none",
               }}>
                 <span style={{ fontSize: "12px", color: C.textSec, fontFamily: "monospace" }}>{f.name}</span>
                 <span style={{ fontSize: "12px", color: C.text, fontWeight: 500 }}>{f.value}</span>
@@ -1090,7 +1324,7 @@ function ForecastDecisionPack({ domain }: { domain: DomainId }) {
           <div style={card}>
             <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: "0 0 13px" }}>Source evidence</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {b.evidence.map((ev, i) => (
+              {allEvidence.map((ev, i) => (
                 <div key={i} style={{
                   padding: "10px 13px", background: "#fafafa",
                   border: `1px solid ${C.borderSub}`, borderRadius: "8px",
@@ -1118,6 +1352,9 @@ export default function App() {
   const [domain, setDomain] = useState<DomainId>("mining");
   const [modal, setModal] = useState(false);
   const [customLabel, setCustomLabel] = useState("");
+  const [parsedResult, setParsedResult] = useState<ParsedResult | null>(null);
+
+  const handleSetDomain = (d: DomainId) => { setDomain(d); setParsedResult(null); };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "Inter, -apple-system, sans-serif" }}>
@@ -1157,19 +1394,20 @@ export default function App() {
         {tab === "intake" && (
           <SignalIntake
             domain={domain}
-            setDomain={setDomain}
-            onGenerate={() => setTab("intelligence")}
+            setDomain={handleSetDomain}
+            onGenerate={(url, note) => { setParsedResult(parseMarketInput(domain, url, note)); setTab("intelligence"); }}
             onAddDomain={() => setModal(true)}
             customLabel={customLabel}
+            parsedResult={parsedResult}
           />
         )}
         {tab === "intelligence" && (
-          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} />
+          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} parsedResult={parsedResult} />
         )}
-        {tab === "forecast" && <ForecastDecisionPack domain={domain} />}
+        {tab === "forecast" && <ForecastDecisionPack domain={domain} parsedResult={parsedResult} />}
       </main>
 
-      {modal && <AddDomainModal onClose={() => setModal(false)} onAdd={(name) => { setCustomLabel(name); setDomain("custom"); }} />}
+      {modal && <AddDomainModal onClose={() => setModal(false)} onAdd={(name) => { setCustomLabel(name); handleSetDomain("custom"); }} />}
     </div>
   );
 }
