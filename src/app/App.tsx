@@ -249,7 +249,6 @@ const C = {
   card: "#ffffff",
   inputBg: "#f8fafc",
   green: "#16a34a",
-  greenHover: "#15803d",
   greenSubtle: "rgba(22,163,74,0.08)",
   greenBorder: "rgba(22,163,74,0.22)",
   text: "#0f172a",
@@ -784,7 +783,7 @@ function SignalIntake({
               <p style={{ fontSize: "13px", color: C.textSec, margin: "0 0 4px" }}>
                 Drop CSV / Excel / PDF / TXT files here
               </p>
-              <p style={{ fontSize: "12px", color: C.textFaint, margin: 0 }}>or choose prepared demo files</p>
+              <p style={{ fontSize: "12px", color: C.textFaint, margin: 0 }}>Visual placeholder — use the note field below for demo parsing</p>
             </div>
           </div>
 
@@ -1276,12 +1275,12 @@ function ForecastDecisionPack({ domain, parsedResult }: { domain: DomainId; pars
             <button style={{
               padding: "10px 22px", background: C.green, color: "#fff",
               border: "none", borderRadius: "8px", fontSize: "13px", fontWeight: 600, cursor: "pointer",
-            }}>Export brief</button>
+            }}>Export brief (demo)</button>
             <button style={{
               padding: "10px 22px", background: "transparent", color: C.textSec,
               border: `1px solid ${C.borderInput}`, borderRadius: "8px",
               fontSize: "13px", cursor: "pointer",
-            }}>Share with analysts</button>
+            }}>Share with analysts (demo)</button>
           </div>
         </div>
 
@@ -1317,7 +1316,7 @@ function ForecastDecisionPack({ domain, parsedResult }: { domain: DomainId; pars
               background: "#f8fafc", color: C.textSec,
               border: `1px solid ${C.borderInput}`, borderRadius: "8px",
               fontSize: "12px", fontWeight: 500, cursor: "pointer",
-            }}>Export signal table</button>
+            }}>Export signal table (demo)</button>
           </div>
 
           {/* Source evidence */}
