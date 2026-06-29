@@ -54,6 +54,109 @@ type UploadedFileSignal = {
   forecastUse: string;
 };
 
+// ── LLM backend types & client ────────────────────────────────────────────
+
+interface LLMSignalOut {
+  label: string;
+  direction: string;
+  strength: string;
+  confidence: number;
+  evidence: string;
+  forecast_use: string;
+}
+
+interface LLMTrainingSignal {
+  feature: string;
+  value: string;
+  direction: string;
+  source: string;
+  forecast_use: string;
+}
+
+interface LLMSourceEvidence {
+  source: string;
+  evidence: string;
+}
+
+interface LLMChartGuidance {
+  bias: string;
+  signal_change_pct: number;
+  uncertainty_band_pct: number;
+  top_driver: string;
+  event_markers: string[];
+  model_mode: string;
+}
+
+interface LLMResponse {
+  detected_domain: string;
+  source_type: string;
+  outlook: string;
+  forecast_pressure: string;
+  confidence: number;
+  confidence_label: string;
+  horizon: string;
+  volatility_risk: string;
+  signals: LLMSignalOut[];
+  upward_drivers: string[];
+  offsets: string[];
+  watchlist: string[];
+  reasoning: string;
+  training_signals: LLMTrainingSignal[];
+  source_evidence: LLMSourceEvidence[];
+  chart_guidance: LLMChartGuidance;
+}
+
+type GenerateStatus = "idle" | "analysing" | "done" | "error";
+
+const BACKEND_URL = "http://127.0.0.1:8001";
+
+async function callLLMMarketSignals(
+  selectedDomain: DomainId,
+  url: string,
+  note: string,
+  uploadedFiles: UploadedSource[],
+  csvSignals: UploadedFileSignal[],
+): Promise<LLMResponse> {
+  const payload = {
+    selected_domain: selectedDomain,
+    url,
+    note,
+    uploaded_files: uploadedFiles
+      .filter((f) => f.status === "parsed")
+      .map((f) => ({
+        name: f.name,
+        extension: f.extension,
+        detected_domain: f.detectedDomain || null,
+        source_category: f.sourceCategory || null,
+        row_count: f.rowCount || 0,
+        column_count: f.columnCount || 0,
+        columns: f.columns || [],
+        preview: f.preview.slice(0, 300),
+      })),
+    csv_signals: csvSignals.map((s) => ({
+      fileName: s.fileName,
+      domain: s.domain,
+      sourceCategory: s.sourceCategory,
+      signal: s.signal,
+      direction: s.direction,
+      strength: s.strength,
+      confidence: s.confidence,
+      evidence: s.evidence,
+      forecastUse: s.forecastUse,
+    })),
+  };
+  const res = await fetch(`${BACKEND_URL}/parse-market-signals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Backend error ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Domain data ────────────────────────────────────────────────────────────
 
 const DOMAINS: Record<DomainId, {
@@ -1434,6 +1537,89 @@ function activeRisks_remaining(signals: Signal[]): string[] {
   return highStr.length > 0 ? [`Signal concentration risk — ${highStr.length} high-strength indicator${highStr.length > 1 ? "s" : ""}`] : [];
 }
 
+// ── LLM response → ActiveIntelligence mapper ─────────────────────────────
+
+function mapLLMToActiveIntelligence(llm: LLMResponse, domain: DomainId): ActiveIntelligence {
+  const baseDc = DOMAIN_CHARTS[domain];
+  const dirColor = (dir: string) =>
+    dir === "Bullish" ? C.green : dir === "Bearish" ? C.red : dir === "Mixed" ? C.amber : "#6b7280";
+
+  const signals: Signal[] = llm.signals.map((s) => ({
+    name: s.label,
+    direction: s.direction,
+    directionColor: dirColor(s.direction),
+    strength: s.strength === "High" ? 82 : s.strength === "Medium" ? 68 : 50,
+    confidence: `${s.confidence}%`,
+  }));
+
+  const drivers: { name: string; contribution: number }[] = [
+    ...llm.upward_drivers.map((d, i) => ({ name: d, contribution: Math.max(10, 30 - i * 6) })),
+    ...llm.offsets.map((d) => ({ name: d, contribution: -15 })),
+  ].slice(0, 6);
+
+  const outlookColor = dirColor(
+    llm.outlook.toLowerCase().includes("bullish") ? "Bullish"
+    : llm.outlook.toLowerCase().includes("bearish") ? "Bearish"
+    : "Mixed"
+  );
+
+  const chartBase = baseDc.chartData;
+  const actualPoints = chartBase.filter((r) => r.actual !== undefined);
+  const chartEvents = llm.chart_guidance.event_markers.slice(0, 3).map((label, i) => {
+    const idx = Math.min(Math.floor(actualPoints.length * (0.4 + i * 0.25)), actualPoints.length - 1);
+    const pt = actualPoints[idx] || actualPoints[actualPoints.length - 1];
+    return { period: pt.period, value: pt.actual || 100, label };
+  });
+
+  const volColor = llm.volatility_risk.toLowerCase().includes("high") ? C.red
+    : llm.volatility_risk.toLowerCase().includes("medium") ? C.amber : C.green;
+
+  const summaryMetrics = [
+    { label: "Forecast pressure", value: llm.forecast_pressure, color: outlookColor },
+    { label: "Confidence", value: `${llm.confidence}%`, color: C.text },
+    { label: "Volatility risk", value: llm.volatility_risk, color: volColor },
+    { label: "Horizon", value: llm.horizon, color: C.text },
+  ];
+
+  const topDriver = llm.chart_guidance.top_driver || (drivers[0]?.name ?? "Source signals");
+  const chartMetrics = [
+    { label: "Forecast bias", value: llm.chart_guidance.bias || llm.outlook, color: outlookColor },
+    { label: "30-day signal change", value: `+${llm.chart_guidance.signal_change_pct.toFixed(1)}%`, color: C.green },
+    { label: "Confidence", value: `${llm.confidence}%`, color: C.text },
+    { label: "Uncertainty band", value: `\u00B1${llm.chart_guidance.uncertainty_band_pct.toFixed(1)}%`, color: llm.chart_guidance.uncertainty_band_pct > 7 ? C.amber : C.text },
+    { label: "Top driver", value: topDriver.length > 28 ? topDriver.slice(0, 26) + "\u2026" : topDriver, color: C.text },
+    { label: "Model mode", value: "LLM-structured", color: C.textMuted },
+  ];
+
+  const features = llm.training_signals.map((t) => ({
+    name: t.feature.slice(0, 28),
+    value: parseFloat(t.value) || 0,
+    direction: t.direction,
+    directionColor: dirColor(t.direction),
+    source: t.source,
+  }));
+
+  const evidence = llm.source_evidence.map((e) => `${e.source}: ${e.evidence}`);
+
+  const risks = [
+    ...llm.watchlist.map((w) => `${w} remains a risk factor`),
+    ...llm.offsets.map((o) => `${o} may reverse`),
+  ].slice(0, 4);
+
+  return {
+    hasSourceInput: true,
+    signals,
+    drivers,
+    reasoning: { headline: `${llm.outlook} outlook`, body: llm.reasoning },
+    chartEvents,
+    summaryMetrics,
+    chartMetrics,
+    risks: risks.length > 0 ? risks : DOMAINS[domain].brief.risks,
+    features: features.length > 0 ? features : DOMAINS[domain].brief.features,
+    evidence: evidence.length > 0 ? evidence : DOMAINS[domain].brief.evidence,
+  };
+}
+
 // ── AddDomainModal ──────────────────────────────────────────────────────────
 
 function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name: string) => void }) {
@@ -1535,7 +1721,7 @@ function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name:
 
 function SignalIntake({
   domain, setDomain, onGenerate, onAddDomain, customLabel, parsedResult,
-  uploadedFiles, onFilesUploaded, csvSignals,
+  uploadedFiles, onFilesUploaded, csvSignals, generateStatus, generateError, generatedSources,
 }: {
   domain: DomainId;
   setDomain: (d: DomainId) => void;
@@ -1546,6 +1732,9 @@ function SignalIntake({
   uploadedFiles: UploadedSource[];
   onFilesUploaded: (files: UploadedSource[], txtContent: string | null) => void;
   csvSignals: UploadedFileSignal[];
+  generateStatus: GenerateStatus;
+  generateError: string | null;
+  generatedSources: { name: string; type: string; status: string; quality: string }[];
 }) {
   const [dropOpen, setDropOpen] = useState(false);
   const [url, setUrl] = useState("");
@@ -1791,93 +1980,81 @@ function SignalIntake({
             Parsed source preview
           </h3>
 
-          {parsedResult ? (
-            <>
-              <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: "14px" }}>
-                {[
-                  { text: parsedResult.sourceType, green: true },
-                  { text: `${parsedResult.parsedEntities.length} entities`, green: false },
-                  { text: `${parsedResult.confidence}% confidence`, green: true },
-                ].map((chip) => (
-                  <span key={chip.text} style={{
-                    padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: chip.green ? 500 : 400,
-                    background: chip.green ? C.greenSubtle : "#f3f4f6",
-                    border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
-                    color: chip.green ? C.green : C.textSec,
-                  }}>{chip.text}</span>
-                ))}
-              </div>
+          {(() => {
+            // Use snapshot from last generate run if available; otherwise build from live inputs
+            const currentSources: { name: string; type: string; status: string; quality: string }[] =
+              generatedSources.length > 0 ? generatedSources : (() => {
+                const live: { name: string; type: string; status: string; quality: string }[] = [];
+                if (url) {
+                  const urlLower = url.toLowerCase();
+                  const urlLabel = urlLower.includes("drewry") || urlLower.includes("container-index")
+                    ? "Drewry World Container Index URL"
+                    : urlLower.includes("baltic") || urlLower.includes("bdi") ? "Baltic index URL"
+                    : urlLower.includes("freight") || urlLower.includes("shipping") ? "Freight intelligence URL"
+                    : urlLower.includes("mine") || urlLower.includes("metal") || urlLower.includes("copper") ? "Mining intelligence URL"
+                    : urlLower.includes("crop") || urlLower.includes("usda") || urlLower.includes("agri") ? "Agriculture intelligence URL"
+                    : "Market source URL";
+                  live.push({ name: urlLabel, type: "URL source", status: "Parsed", quality: "High" });
+                }
+                if (note) {
+                  live.push({ name: "Pasted market note", type: "Unstructured note", status: "Parsed", quality: note.length > 50 ? "High" : "Medium" });
+                }
+                for (const uf of uploadedFiles.filter((f) => f.status === "parsed")) {
+                  const typeLabel = uf.extension === "csv" ? "Structured data" : uf.extension === "json" ? "Source metadata" : "Text source";
+                  live.push({ name: uf.name, type: uf.sourceCategory || typeLabel, status: "Parsed", quality: uf.extension === "csv" ? "High" : "Medium" });
+                }
+                return live;
+              })();
 
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "6px" }}>
-                {parsedResult.extractedSignals.map((sig, i) => (
-                  <div key={i} style={{
-                    padding: "10px 13px", background: "#fafafa",
-                    border: `1px solid ${C.borderSub}`, borderRadius: "8px",
-                  }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "3px" }}>
-                      <span style={{ fontSize: "13px", fontWeight: 500, color: C.text }}>{sig.label}</span>
-                      <span style={{ fontSize: "11px", fontWeight: 500, color: sig.directionColor }}>{sig.direction}</span>
-                    </div>
-                    <p style={{ fontSize: "11px", color: C.textFaint, margin: 0 }}>{sig.evidence}</p>
-                  </div>
-                ))}
-              </div>
+            const sourceCount = currentSources.length;
+            const hasAnySrc = sourceCount > 0;
 
-              <div style={{ marginTop: "14px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                <p style={{ fontSize: "11px", fontWeight: 500, color: C.textMuted, margin: "0 0 2px" }}>Extraction status</p>
-                {parsedResult.statusSteps.map((step) => (
-                  <div key={step} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                    <span style={{ fontSize: "11px", color: C.green }}>&#10003;</span>
-                    <span style={{ fontSize: "11px", color: C.textSec }}>{step}</span>
-                  </div>
-                ))}
-              </div>
-            </>
-          ) : (
-            <>
-              <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: "18px" }}>
-                {[
-                  { text: `${d.parsedSources.length} sources parsed`, green: true },
-                  { text: "92% readiness", green: false },
-                  { text: "3 gaps fixed", green: false },
-                ].map((chip) => (
-                  <span key={chip.text} style={{
-                    padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: chip.green ? 500 : 400,
-                    background: chip.green ? C.greenSubtle : "#f3f4f6",
-                    border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
-                    color: chip.green ? C.green : C.textSec,
-                  }}>{chip.text}</span>
-                ))}
-              </div>
-
-              <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "8px" }}>
-                {d.parsedSources.map((src, i) => (
-                  <div key={i} style={{
-                    padding: "11px 13px", background: "#fafafa",
-                    border: `1px solid ${C.borderSub}`, borderRadius: "8px",
-                    display: "flex", alignItems: "center", justifyContent: "space-between",
-                  }}>
-                    <div>
-                      <p style={{ fontSize: "13px", fontWeight: 500, color: C.text, margin: 0 }}>{src.name}</p>
-                      <p style={{ fontSize: "11px", color: C.textFaint, margin: "2px 0 0" }}>{src.type}</p>
+            return hasAnySrc ? (
+              <>
+                <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: "14px" }}>
+                  {[
+                    { text: `${sourceCount} source${sourceCount !== 1 ? "s" : ""} parsed`, green: true },
+                    ...(generateStatus === "done" ? [{ text: "Ready", green: true }] : []),
+                  ].map((chip) => (
+                    <span key={chip.text} style={{
+                      padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: chip.green ? 500 : 400,
+                      background: chip.green ? C.greenSubtle : "#f3f4f6",
+                      border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
+                      color: chip.green ? C.green : C.textSec,
+                    }}>{chip.text}</span>
+                  ))}
+                </div>
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "8px" }}>
+                  {currentSources.map((src, i) => (
+                    <div key={i} style={{
+                      padding: "11px 13px", background: "#fafafa",
+                      border: `1px solid ${C.borderSub}`, borderRadius: "8px",
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                    }}>
+                      <div>
+                        <p style={{ fontSize: "13px", fontWeight: 500, color: C.text, margin: 0 }}>{src.name}</p>
+                        <p style={{ fontSize: "11px", color: C.textFaint, margin: "2px 0 0" }}>{src.type}</p>
+                      </div>
+                      <div style={{ display: "flex", gap: "6px" }}>
+                        <span style={{ padding: "3px 8px", background: "#f3f4f6", borderRadius: "4px", fontSize: "11px", color: C.textSec }}>{src.status}</span>
+                        <span style={{ padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
+                          background: src.quality === "High" ? "rgba(22,163,74,0.10)" : "#f3f4f6",
+                          color: src.quality === "High" ? C.green : C.textMuted,
+                          fontWeight: src.quality === "High" ? 500 : 400,
+                        }}>{src.quality}</span>
+                      </div>
                     </div>
-                    <div style={{ display: "flex", gap: "6px" }}>
-                      <span style={{
-                        padding: "3px 8px", background: "#f3f4f6", borderRadius: "4px",
-                        fontSize: "11px", color: C.textSec,
-                      }}>{src.status}</span>
-                      <span style={{
-                        padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
-                        background: src.quality === "High" ? "rgba(22,163,74,0.10)" : "#f3f4f6",
-                        color: src.quality === "High" ? C.green : C.textMuted,
-                        fontWeight: src.quality === "High" ? 500 : 400,
-                      }}>{src.quality}</span>
-                    </div>
-                  </div>
-                ))}
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "30px 20px" }}>
+                <p style={{ fontSize: "13px", color: C.textFaint, textAlign: "center", margin: 0, lineHeight: 1.65 }}>
+                  No sources parsed yet.<br />Add a URL, upload files, or paste a note to generate market signals.
+                </p>
               </div>
-            </>
-          )}
+            );
+          })()}
 
           {uploadedFiles.length > 0 && (() => {
             const parsedCount = uploadedFiles.filter((f) => f.status === "parsed").length;
@@ -1902,14 +2079,44 @@ function SignalIntake({
             );
           })()}
 
+          {generateStatus === "analysing" && (
+            <div style={{ marginTop: "14px", padding: "12px 14px", background: "rgba(22,163,74,0.06)", border: `1px solid rgba(22,163,74,0.18)`, borderRadius: "8px", display: "flex", alignItems: "center", gap: "10px" }}>
+              <span style={{ fontSize: "14px", animation: "spin 1s linear infinite", display: "inline-block" }}>&#9696;</span>
+              <span style={{ fontSize: "13px", color: C.green, fontWeight: 500 }}>Analysing sources...</span>
+              <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+            </div>
+          )}
+
+          {generateStatus === "error" && generateError && (
+            <div style={{ marginTop: "14px", padding: "12px 14px", background: "rgba(220,38,38,0.06)", border: `1px solid rgba(220,38,38,0.18)`, borderRadius: "8px" }}>
+              <p style={{ fontSize: "12px", color: C.red, fontWeight: 500, margin: "0 0 4px" }}>Intelligence service unavailable</p>
+              <p style={{ fontSize: "11px", color: C.textSec, margin: 0 }}>{generateError}</p>
+              <p style={{ fontSize: "11px", color: C.textFaint, margin: "4px 0 0" }}>Deterministic fallback was used. Start the backend and confirm the API key for LLM intelligence.</p>
+            </div>
+          )}
+
+          {generateStatus === "done" && (
+            <div style={{ marginTop: "14px", display: "flex", flexDirection: "column", gap: "4px" }}>
+              {["Market signals generated", "Decision pack refreshed", "Source intelligence ready"].map((s) => (
+                <div key={s} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <span style={{ fontSize: "11px", color: C.green }}>{"\u2713"}</span>
+                  <span style={{ fontSize: "11px", color: C.green, fontWeight: 500 }}>{s}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <button
             onClick={() => onGenerate(url, note)}
+            disabled={generateStatus === "analysing"}
             style={{
               marginTop: "18px", width: "100%", padding: "12px",
-              background: C.green, color: "#fff", border: "none",
-              borderRadius: "8px", fontSize: "14px", fontWeight: 600, cursor: "pointer",
+              background: generateStatus === "analysing" ? C.textFaint : C.green, color: "#fff", border: "none",
+              borderRadius: "8px", fontSize: "14px", fontWeight: 600,
+              cursor: generateStatus === "analysing" ? "not-allowed" : "pointer",
+              opacity: generateStatus === "analysing" ? 0.7 : 1,
             }}
-          >Generate market signals</button>
+          >{generateStatus === "analysing" ? "Analysing..." : "Generate market signals"}</button>
         </div>
       </div>
     </div>
@@ -1918,7 +2125,7 @@ function SignalIntake({
 
 // ── Screen 2: Signal Intelligence ──────────────────────────────────────────
 
-function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, combinedReadout, activeIntel }: { domain: DomainId; onGenerate: () => void; parsedResult: ParsedResult | null; csvSignals: UploadedFileSignal[]; combinedReadout: CombinedReadout | null; activeIntel: ActiveIntelligence }) {
+function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, combinedReadout, activeIntel, generateStatus, generateError, llmResponse }: { domain: DomainId; onGenerate: () => void; parsedResult: ParsedResult | null; csvSignals: UploadedFileSignal[]; combinedReadout: CombinedReadout | null; activeIntel: ActiveIntelligence; generateStatus: GenerateStatus; generateError: string | null; llmResponse: LLMResponse | null }) {
   const baseDc = DOMAIN_CHARTS[domain];
   const hasSource = activeIntel.hasSourceInput;
   // Chart: adjust from all source signals (note + CSV)
@@ -1938,6 +2145,22 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
 
   return (
     <div>
+
+      {/* Error banner */}
+      {generateStatus === "error" && generateError && (
+        <div style={{ marginBottom: "14px", padding: "12px 16px", background: "rgba(220,38,38,0.06)", border: `1px solid rgba(220,38,38,0.18)`, borderRadius: "8px" }}>
+          <p style={{ fontSize: "12px", color: C.red, fontWeight: 500, margin: "0 0 4px" }}>Intelligence service unavailable — showing deterministic fallback</p>
+          <p style={{ fontSize: "11px", color: C.textSec, margin: 0 }}>{generateError}</p>
+        </div>
+      )}
+
+      {/* LLM source badge */}
+      {llmResponse && (
+        <div style={{ marginBottom: "14px", padding: "10px 16px", background: "rgba(22,163,74,0.06)", border: `1px solid rgba(22,163,74,0.18)`, borderRadius: "8px", display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "11px", color: C.green, fontWeight: 600 }}>LLM intelligence</span>
+          <span style={{ fontSize: "11px", color: C.textMuted }}>Source: {llmResponse.source_type} | Domain: {llmResponse.detected_domain}</span>
+        </div>
+      )}
 
       {/* Metric cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "12px", marginBottom: "18px" }}>
@@ -2306,10 +2529,10 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
             borderRadius: "8px",
           }}>
             <p style={{ fontSize: "11px", color: C.green, margin: 0, fontWeight: 500 }}>
-              {hasSource ? "Source-adjusted demo mode" : "Deterministic demo mode"}
+              {llmResponse ? "LLM-structured intelligence" : hasSource ? "Source-adjusted demo mode" : "Deterministic demo mode"}
             </p>
             <p style={{ fontSize: "10px", color: C.textMuted, margin: "3px 0 0" }}>
-              {hasSource ? "Uploaded/entered source signals adjust this deterministic forecast path. No live model/API used." : "Baseline domain sample data. Upload files, paste a URL, or enter a note to adjust."}
+              {llmResponse ? (llmResponse.chart_guidance?.model_mode || "LLM-structured source intelligence; no live scraping.") : hasSource ? "Uploaded/entered source signals adjust this deterministic forecast path. No live model/API used." : "Baseline domain sample data. Upload files, paste a URL, or enter a note to adjust."}
             </p>
           </div>
         </div>
@@ -2460,10 +2683,85 @@ export default function App() {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedSource[]>([]);
   const [csvSignals, setCsvSignals] = useState<UploadedFileSignal[]>([]);
   const [combinedReadout, setCombinedReadout] = useState<CombinedReadout | null>(null);
+  const [llmIntel, setLlmIntel] = useState<ActiveIntelligence | null>(null);
+  const [llmResponse, setLlmResponse] = useState<LLMResponse | null>(null);
+  const [generateStatus, setGenerateStatus] = useState<GenerateStatus>("idle");
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [generatedSources, setGeneratedSources] = useState<{ name: string; type: string; status: string; quality: string }[]>([]);
 
-  const activeIntel = getActiveIntelligence(domain, parsedResult, csvSignals, combinedReadout);
+  // LLM intel takes priority; fall back to deterministic
+  const deterministicIntel = getActiveIntelligence(domain, parsedResult, csvSignals, combinedReadout);
+  const activeIntel = llmIntel || deterministicIntel;
 
-  const handleSetDomain = (d: DomainId) => { setDomain(d); setParsedResult(null); setUploadedFiles([]); setCsvSignals([]); setCombinedReadout(null); };
+  const handleSetDomain = (d: DomainId) => {
+    setDomain(d); setParsedResult(null); setUploadedFiles([]); setCsvSignals([]);
+    setCombinedReadout(null); setLlmIntel(null); setLlmResponse(null);
+    setGenerateStatus("idle"); setGenerateError(null); setGeneratedSources([]);
+  };
+
+  const handleGenerate = async (url: string, note: string) => {
+    // Snapshot the sources used in this run so preview persists across tab navigation
+    const snapshot: { name: string; type: string; status: string; quality: string }[] = [];
+    if (url) {
+      const ul = url.toLowerCase();
+      const label = ul.includes("drewry") || ul.includes("container-index") ? "Drewry World Container Index URL"
+        : ul.includes("baltic") || ul.includes("bdi") ? "Baltic index URL"
+        : ul.includes("freight") || ul.includes("shipping") ? "Freight intelligence URL"
+        : ul.includes("mine") || ul.includes("metal") || ul.includes("copper") ? "Mining intelligence URL"
+        : ul.includes("crop") || ul.includes("usda") || ul.includes("agri") ? "Agriculture intelligence URL"
+        : "Market source URL";
+      snapshot.push({ name: label, type: "URL source", status: "Parsed", quality: "High" });
+    }
+    if (note) {
+      snapshot.push({ name: "Pasted market note", type: "Unstructured note", status: "Parsed", quality: note.length > 50 ? "High" : "Medium" });
+    }
+    for (const uf of uploadedFiles.filter((f) => f.status === "parsed")) {
+      const typeLabel = uf.extension === "csv" ? "Structured data" : uf.extension === "json" ? "Source metadata" : "Text source";
+      snapshot.push({ name: uf.name, type: uf.sourceCategory || typeLabel, status: "Parsed", quality: uf.extension === "csv" ? "High" : "Medium" });
+    }
+    setGeneratedSources(snapshot);
+
+    // Always run deterministic extraction for CSV signals
+    const cs = extractSignalsFromUploadedFiles(uploadedFiles, domain);
+    setCsvSignals(cs);
+    setGenerateStatus("analysing");
+    setGenerateError(null);
+    setLlmIntel(null);
+    setLlmResponse(null);
+
+    try {
+      const llm = await callLLMMarketSignals(domain, url, note, uploadedFiles, cs);
+      setLlmResponse(llm);
+      const mapped = mapLLMToActiveIntelligence(llm, domain);
+      setLlmIntel(mapped);
+      // Also set combined readout from LLM for components that use it
+      setCombinedReadout({
+        outlook: llm.outlook,
+        outlookColor: llm.outlook.toLowerCase().includes("bullish") ? C.green : llm.outlook.toLowerCase().includes("bearish") ? C.red : C.amber,
+        confidence: `${llm.confidence}%`,
+        confidenceNum: llm.confidence,
+        horizon: llm.horizon,
+        upwardDrivers: llm.upward_drivers,
+        offsets: llm.offsets,
+        watchlist: llm.watchlist,
+        sourceCount: uploadedFiles.length + (url ? 1 : 0) + (note ? 1 : 0),
+        signalCount: llm.signals.length,
+        reasoning: llm.reasoning,
+      });
+      setGenerateStatus("done");
+      setTab("intelligence");
+    } catch (err) {
+      // Fallback to deterministic
+      const pr = parseMarketInput(domain, url, note);
+      setParsedResult(pr);
+      setCombinedReadout(buildCombinedReadout(domain, pr, cs, uploadedFiles));
+      setGenerateError(
+        err instanceof Error ? err.message : "Intelligence service unavailable. Start the backend and confirm the API key."
+      );
+      setGenerateStatus("error");
+      setTab("intelligence");
+    }
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "Inter, -apple-system, sans-serif" }}>
@@ -2504,14 +2802,7 @@ export default function App() {
           <SignalIntake
             domain={domain}
             setDomain={handleSetDomain}
-            onGenerate={(url, note) => {
-              const pr = parseMarketInput(domain, url, note);
-              const cs = extractSignalsFromUploadedFiles(uploadedFiles, domain);
-              setParsedResult(pr);
-              setCsvSignals(cs);
-              setCombinedReadout(buildCombinedReadout(domain, pr, cs, uploadedFiles));
-              setTab("intelligence");
-            }}
+            onGenerate={handleGenerate}
             onAddDomain={() => setModal(true)}
             customLabel={customLabel}
             parsedResult={parsedResult}
@@ -2522,10 +2813,13 @@ export default function App() {
               setCsvSignals(extractSignalsFromUploadedFiles(next, domain));
             }}
             csvSignals={csvSignals}
+            generateStatus={generateStatus}
+            generateError={generateError}
+            generatedSources={generatedSources}
           />
         )}
         {tab === "intelligence" && (
-          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} />
+          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} generateStatus={generateStatus} generateError={generateError} llmResponse={llmResponse} />
         )}
         {tab === "forecast" && <ForecastDecisionPack domain={domain} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} />}
       </main>
