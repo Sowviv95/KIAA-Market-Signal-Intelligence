@@ -2,7 +2,7 @@
 
 A reusable market intelligence platform demo built with React, Vite and Recharts. The app parses external market notes and URLs into forecast-ready signals with analyst-style decision support.
 
-This is a **frontend-only deterministic demo**. There is no backend, no API keys, no live scraping, no LLM calls and no ML model. All intelligence is generated from hardcoded keyword rules and sample data.
+This is a **demo application** with a React frontend and an optional FastAPI backend. The backend uses an LLM (OpenAI) to produce structured market intelligence. The API key stays in `backend/.env` (never in the frontend). Only `backend/.env.example` is committed — `backend/.env` must not be committed to Git. If the backend is unavailable, the frontend falls back to deterministic keyword-based parsing.
 
 ## What the demo shows
 
@@ -56,14 +56,29 @@ Before any input is generated, screens show default domain sample data. After cl
 
 No live model, API, or scraping is used.
 
+### Frontend-backend integration (Sprint 5E)
+
+Clicking **Generate market signals** now calls the backend LLM endpoint. The API key stays in `backend/.env` — no secrets in the frontend.
+
+- Frontend calls `POST http://127.0.0.1:8001/parse-market-signals` with domain, URL, note, file summaries, and CSV signals
+- LLM response drives all screens: signals table, top metrics, drivers, chart, decision pack
+- If the backend is unavailable, the app falls back to deterministic parsing with a clear error banner
+- No toggle needed — the app simply uses the intelligence service when available
+
+**To run the full stack:**
+
+1. Start the backend first (see `backend/README.md` for setup)
+2. Start the frontend: `pnpm dev`
+3. Click Generate — the backend produces LLM-structured intelligence
+
 ## What is intentionally not included
 
-- No backend or server
 - No database or persistence
-- No API keys or `.env` configuration
+- No frontend API keys — the OpenAI key stays in `backend/.env` only
 - No live URL scraping (URLs are parsed by text only)
-- No LLM, ML model or real-time data
+- No file storage — uploaded files are read in-browser and never stored
 - No authentication or user accounts
+- No production folder watcher or FTP sync in this demo
 - No dark mode (KIAA light theme only)
 
 ## Setup
@@ -136,7 +151,7 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 cp .env.example .env            # then add OPENAI_API_KEY
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
 ```
 
 See `backend/README.md` for full setup, endpoints, and test payloads.
