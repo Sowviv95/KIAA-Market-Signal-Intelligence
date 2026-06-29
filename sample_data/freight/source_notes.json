@@ -1,0 +1,10 @@
+{
+  "domain": "freight",
+  "sources": [
+    { "name": "BDI Weekly Report", "type": "index", "frequency": "weekly" },
+    { "name": "Port Authority Congestion Update", "type": "bulletin", "frequency": "daily" },
+    { "name": "Bunker Fuel Price Feed", "type": "price_feed", "frequency": "daily" }
+  ],
+  "coverage_period": "W1 Feb - W3 Feb",
+  "last_updated": "2025-02-21"
+}

@@ -17,10 +17,44 @@ Supported domains: Mining commodities, Freight / shipping rates, Agriculture com
 The file upload area accepts local `.txt`, `.csv`, and `.json` files:
 
 - **TXT** — content is added to the market note field for signal generation via the existing parser
-- **CSV** — headers, row/column counts, and sample rows are previewed; signal extraction from CSVs is planned for a future sprint
+- **CSV** — headers, row/column counts, and sample rows are previewed; domain-aware signals are extracted deterministically (see below)
 - **JSON** — top-level keys and source metadata are previewed
 
 All files are read in-browser using the File API. No files leave the browser and nothing is uploaded to a server.
+
+### CSV signal extraction (Sprint 5B)
+
+Uploaded CSV files now generate deterministic domain-aware source signals based on file name and column headers. Extracted signals appear on all three screens (intake preview, intelligence table, and forecast decision pack).
+
+Supported domain examples:
+
+- **Freight** — port congestion, rate index, and fuel cost CSVs produce congestion pressure, rate direction, and bunker fuel offset signals
+- **Mining** — inventory, production, shipment, smelter, and commodity CSVs produce supply/demand signals
+- **Agriculture** — weather, export, stock-to-use, and crop/yield CSVs produce yield risk, demand, and seasonal signals
+
+Signal extraction is fully deterministic with no backend, API, LLM, or scraping.
+
+### Combined readout and chart adjustment (Sprint 5C)
+
+Uploaded CSV signals now drive a combined market readout and a visibly signal-adjusted forecast chart:
+
+- **Combined readout** — outlook, confidence, horizon, upward drivers, offsets, and analyst reasoning are computed from all parsed signals (note/URL + CSV)
+- **Chart adjustment** — the forecast median and uncertainty band shift deterministically based on signal direction and strength scores; no live model or API is used
+- **Freight upload pack** — recommended upload order: `freight_market_note.txt`, `freight_port_congestion.csv`, `freight_rate_index.csv`, `freight_fuel_costs.csv`, `source_notes.json`. Expected output: mildly bullish outlook over 2-4 weeks, with congestion and rate pressure as upward drivers and bunker fuel easing as a partial offset
+
+All files are read locally in the browser. No files leave the browser and nothing is uploaded to a server. No backend, API, LLM, or scraping is used.
+
+### Active intelligence state (Sprint 5C correction)
+
+Before any input is generated, screens show default domain sample data. After clicking **Generate market signals** with a URL, note, or uploaded files, source-derived intelligence becomes the primary state across all screens:
+
+- **Generated market signals table** — shows URL/note/CSV-derived signals instead of default domain rows
+- **Top metric cards** — reflect source-derived outlook, confidence, volatility, and horizon
+- **Forecast reasoning and drivers** — computed from parsed signals, not hardcoded
+- **Chart** — forecast path is deterministically adjusted from source signal scores; event markers reflect parsed signals
+- **Decision pack** — features, evidence, and risks all reflect source-derived intelligence
+
+No live model, API, or scraping is used.
 
 ## What is intentionally not included
 

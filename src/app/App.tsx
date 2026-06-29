@@ -37,9 +37,22 @@ interface UploadedSource {
   rowCount?: number;
   columnCount?: number;
   columns?: string[];
+  parsedRows?: Record<string, string>[];
   preview: string;
   message?: string;
 }
+
+type UploadedFileSignal = {
+  fileName: string;
+  domain: DomainId | "unknown";
+  sourceCategory: string;
+  signal: string;
+  direction: "Bullish" | "Bearish" | "Mixed" | "Neutral";
+  strength: "Low" | "Medium" | "High";
+  confidence: number;
+  evidence: string;
+  forecastUse: string;
+};
 
 // ── Domain data ────────────────────────────────────────────────────────────
 
@@ -538,45 +551,145 @@ const DOMAIN_KEYWORDS: Record<DomainId, { keyword: string; signal: string; direc
   ],
 };
 
+// URL-specific keyword rules: terms found in URL path/host → signals
+const URL_KEYWORDS: Record<DomainId, { term: string; signal: string; direction: string; strength: number; confidence: number; entity: string }[]> = {
+  freight: [
+    { term: "drewry", signal: "Container freight index source indicates rate benchmark pressure", direction: "Mixed", strength: 68, confidence: 72, entity: "Drewry" },
+    { term: "world-container-index", signal: "World Container Index benchmark tracked", direction: "Mixed", strength: 70, confidence: 74, entity: "World Container Index" },
+    { term: "container-index", signal: "Container freight index tracked", direction: "Mixed", strength: 68, confidence: 70, entity: "container freight index" },
+    { term: "container", signal: "Container freight signal", direction: "Bullish", strength: 72, confidence: 70, entity: "container freight" },
+    { term: "supply-chain", signal: "Supply chain pressure signal", direction: "Bullish", strength: 70, confidence: 68, entity: "supply chain" },
+    { term: "shipping", signal: "Shipping rate intelligence source", direction: "Bullish", strength: 74, confidence: 72, entity: "shipping rates" },
+    { term: "freight", signal: "Freight rate intelligence source", direction: "Bullish", strength: 76, confidence: 74, entity: "freight rates" },
+    { term: "rate", signal: "Rate benchmark signal", direction: "Mixed", strength: 66, confidence: 68, entity: "rate benchmark" },
+    { term: "route", signal: "Route rate signal", direction: "Bullish", strength: 72, confidence: 70, entity: "route rates" },
+    { term: "index", signal: "Market index signal", direction: "Mixed", strength: 64, confidence: 66, entity: "market index" },
+    { term: "congestion", signal: "Port congestion intelligence", direction: "Bullish", strength: 80, confidence: 78, entity: "port congestion" },
+    { term: "bunker", signal: "Bunker fuel intelligence", direction: "Bearish", strength: 68, confidence: 66, entity: "bunker fuel" },
+    { term: "baltic", signal: "Baltic index intelligence", direction: "Bullish", strength: 76, confidence: 74, entity: "Baltic index" },
+    { term: "bdi", signal: "BDI rate intelligence", direction: "Bullish", strength: 76, confidence: 74, entity: "BDI" },
+  ],
+  mining: [
+    { term: "copper", signal: "Copper market intelligence source", direction: "Bullish", strength: 72, confidence: 70, entity: "copper market" },
+    { term: "lithium", signal: "Lithium market intelligence source", direction: "Bullish", strength: 70, confidence: 68, entity: "lithium market" },
+    { term: "nickel", signal: "Nickel market intelligence source", direction: "Bullish", strength: 68, confidence: 66, entity: "nickel market" },
+    { term: "metal", signal: "Metals market intelligence source", direction: "Bullish", strength: 70, confidence: 70, entity: "metals market" },
+    { term: "mine", signal: "Mining production intelligence", direction: "Bullish", strength: 74, confidence: 72, entity: "mining production" },
+    { term: "inventory", signal: "Inventory intelligence source", direction: "Bullish", strength: 76, confidence: 74, entity: "inventory data" },
+    { term: "commodity", signal: "Commodity index intelligence", direction: "Bullish", strength: 68, confidence: 66, entity: "commodity index" },
+  ],
+  agriculture: [
+    { term: "crop", signal: "Crop report intelligence source", direction: "Bullish", strength: 74, confidence: 72, entity: "crop report" },
+    { term: "usda", signal: "USDA report intelligence", direction: "Bullish", strength: 78, confidence: 76, entity: "USDA report" },
+    { term: "weather", signal: "Weather risk intelligence", direction: "Bullish", strength: 72, confidence: 70, entity: "weather risk" },
+    { term: "grain", signal: "Grain market intelligence", direction: "Bullish", strength: 70, confidence: 68, entity: "grain market" },
+    { term: "agri", signal: "Agriculture intelligence source", direction: "Bullish", strength: 68, confidence: 66, entity: "agriculture" },
+    { term: "export", signal: "Export demand intelligence", direction: "Bullish", strength: 72, confidence: 70, entity: "export demand" },
+    { term: "drought", signal: "Drought risk intelligence", direction: "Bullish", strength: 76, confidence: 74, entity: "drought risk" },
+  ],
+  custom: [
+    { term: "market", signal: "Market intelligence source", direction: "Watch", strength: 58, confidence: 58, entity: "market data" },
+    { term: "index", signal: "Index benchmark source", direction: "Watch", strength: 56, confidence: 56, entity: "index benchmark" },
+    { term: "data", signal: "Data source detected", direction: "Watch", strength: 54, confidence: 54, entity: "data source" },
+  ],
+};
+
 function parseMarketInput(domain: DomainId, url: string, note: string): ParsedResult {
   const text = (url + " " + note).toLowerCase();
   const keywords = DOMAIN_KEYWORDS[domain];
   const matched = keywords.filter((k) => text.includes(k.keyword));
 
+  // URL-specific keyword extraction: parse URL path/host for domain terms
+  const urlMatched: typeof URL_KEYWORDS["freight"] = [];
+  if (url) {
+    const urlLower = url.toLowerCase();
+    const urlTerms = URL_KEYWORDS[domain] || [];
+    const seen = new Set<string>();
+    for (const ut of urlTerms) {
+      if (urlLower.includes(ut.term) && !seen.has(ut.signal)) {
+        seen.add(ut.signal);
+        urlMatched.push(ut);
+      }
+    }
+  }
+
   // Infer source type
   let sourceType = "Market note";
   if (url) {
     const u = url.toLowerCase();
-    if (u.includes("port") || u.includes("shipping") || u.includes("freight") || u.includes("bunker")) sourceType = "Freight intelligence URL";
+    // More specific source types from URL content
+    if (u.includes("drewry") || u.includes("container-index") || u.includes("world-container-index")) sourceType = "Container freight index / route rate benchmark";
+    else if (u.includes("baltic") || u.includes("bdi")) sourceType = "Baltic index intelligence URL";
+    else if (u.includes("port") || u.includes("shipping") || u.includes("freight") || u.includes("bunker") || u.includes("container") || u.includes("supply-chain")) sourceType = "Freight intelligence URL";
     else if (u.includes("mine") || u.includes("metal") || u.includes("copper") || u.includes("lithium") || u.includes("inventory")) sourceType = "Mining intelligence URL";
-    else if (u.includes("crop") || u.includes("weather") || u.includes("agri") || u.includes("grain") || u.includes("export")) sourceType = "Agriculture intelligence URL";
+    else if (u.includes("crop") || u.includes("weather") || u.includes("agri") || u.includes("grain") || u.includes("export") || u.includes("usda")) sourceType = "Agriculture intelligence URL";
     else sourceType = "External source URL";
   } else if (note) {
     sourceType = domain === "mining" ? "Analyst market note" : domain === "freight" ? "Route intelligence note" : domain === "agriculture" ? "Crop market note" : "Custom market note";
   }
 
-  const hasMatches = matched.length > 0;
-  const signals: ParsedSignal[] = hasMatches
-    ? matched.map((m) => ({
+  // Combine note-keyword matches + URL-keyword matches, dedup by signal label
+  const allSignals: ParsedSignal[] = [];
+  const allEntities: string[] = [];
+  const seenLabels = new Set<string>();
+
+  for (const m of matched) {
+    if (!seenLabels.has(m.signal)) {
+      seenLabels.add(m.signal);
+      allSignals.push({
         label: m.signal,
         direction: m.direction,
         directionColor: DIR_COLOR[m.direction] || "#6b7280",
         strength: m.strength,
         confidence: m.confidence,
-        evidence: `Keyword "${m.keyword}" detected in ${note ? "pasted note" : "URL"}`,
-      }))
+        evidence: `Keyword "${m.keyword}" detected in ${note ? "pasted note" : "URL text"}`,
+      });
+      allEntities.push(m.keyword);
+    }
+  }
+  for (const ut of urlMatched) {
+    if (!seenLabels.has(ut.signal)) {
+      seenLabels.add(ut.signal);
+      allSignals.push({
+        label: ut.signal,
+        direction: ut.direction,
+        directionColor: DIR_COLOR[ut.direction] || "#6b7280",
+        strength: ut.strength,
+        confidence: ut.confidence,
+        evidence: `URL term "${ut.term}" interpreted in demo mode`,
+      });
+      allEntities.push(ut.entity);
+    }
+  }
+
+  const hasMatches = allSignals.length > 0;
+  const signals: ParsedSignal[] = hasMatches
+    ? allSignals
     : [{ label: "General market signal", direction: "Watch", directionColor: "#d97706", strength: 50, confidence: 55, evidence: "No specific keywords matched \u2014 generic signal applied" }];
 
-  const entities = hasMatches ? matched.map((m) => m.keyword) : ["general market"];
+  const entities = hasMatches ? allEntities : ["general market"];
   const avgConf = Math.round(signals.reduce((a, s) => a + s.confidence, 0) / signals.length);
   const bullishCount = signals.filter((s) => s.direction === "Bullish").length;
-  const forecastImpact = bullishCount > signals.length / 2 ? "Upward pressure" : bullishCount === 0 ? "Neutral" : "Mixed with upward skew";
+  const mixedCount = signals.filter((s) => s.direction === "Mixed").length;
+  const forecastImpact = bullishCount > signals.length / 2 ? "Upward pressure"
+    : bullishCount === 0 && mixedCount === 0 ? "Neutral"
+    : "Mixed with upward skew";
 
   const entityList = entities.join(", ");
   const dirWord = forecastImpact === "Upward pressure" ? "upside risk" : forecastImpact === "Neutral" ? "neutral impact" : "mixed directional impact";
   const domLabel = DOMAINS[domain].label.toLowerCase();
   const confWord = avgConf >= 75 ? "moderate-high" : avgConf >= 60 ? "moderate" : "low";
-  const reasoning = `The parsed ${note ? "note" : "source"} indicates ${entityList}, creating near-term ${dirWord} to ${domLabel}. Confidence is ${confWord} because ${signals.length} independent directional indicator${signals.length !== 1 ? "s" : ""} ${signals.length !== 1 ? "point" : "points"} in ${bullishCount > signals.length / 2 ? "the same direction" : "mixed directions"}${avgConf >= 70 ? ", but the uncertainty band remains manageable." : ", and the uncertainty band remains wide."}`;
+  const sourceWord = url && note ? "URL and note" : url ? "URL" : "note";
+  const reasoning = `The parsed ${sourceWord} indicates ${entityList}, creating near-term ${dirWord} to ${domLabel}. Confidence is ${confWord} because ${signals.length} independent directional indicator${signals.length !== 1 ? "s" : ""} ${signals.length !== 1 ? "point" : "points"} in ${bullishCount > signals.length / 2 ? "the same direction" : "mixed directions"}${avgConf >= 70 ? ", but the uncertainty band remains manageable." : ", and the uncertainty band remains wide."}`;
+
+  const statusSteps = [
+    "Source accepted",
+    ...(url ? ["URL interpreted in demo mode"] : []),
+    `${entities.length} market entities detected`,
+    "Directional signals extracted",
+    "Forecast-ready features prepared",
+    "Decision pack refreshed",
+  ];
 
   return {
     sourceType,
@@ -584,13 +697,7 @@ function parseMarketInput(domain: DomainId, url: string, note: string): ParsedRe
     parsedEntities: entities,
     forecastImpact,
     confidence: avgConf,
-    statusSteps: [
-      "Source accepted",
-      `${entities.length} market entities detected`,
-      "Directional signals extracted",
-      "Forecast-ready features prepared",
-      "Decision pack refreshed",
-    ],
+    statusSteps,
     reasoning,
     urlSource: url || null,
     noteSnippet: note ? (note.length > 120 ? note.slice(0, 117) + "..." : note) : null,
@@ -692,10 +799,15 @@ async function parseUploadedFile(file: File): Promise<UploadedSource> {
     }
     const domain = detectedDomain || detectDomainFromColumns(headers);
     const previewRows = rows.slice(0, 3).map((r) => r.join(" | ")).join("\n");
+    const parsedRows = rows.map((r) => {
+      const obj: Record<string, string> = {};
+      headers.forEach((h, idx) => { obj[h] = r[idx] || ""; });
+      return obj;
+    });
     return {
       id, name: file.name, extension: ext, status: "parsed",
       detectedDomain: domain, sourceCategory: "Structured data source",
-      rowCount, columnCount: headers.length, columns: headers,
+      rowCount, columnCount: headers.length, columns: headers, parsedRows,
       preview: headers.join(" | ") + "\n" + previewRows,
       message: `CSV headers detected. ${rowCount} rows, ${headers.length} columns`,
     };
@@ -724,6 +836,602 @@ async function parseUploadedFile(file: File): Promise<UploadedSource> {
       message: "Invalid JSON — could not parse",
     };
   }
+}
+
+// ── CSV signal extraction ──────────────────────────────────────────────────
+
+function headersMatch(columns: string[], keywords: string[]): boolean {
+  const joined = columns.join(" ").toLowerCase();
+  return keywords.some((kw) => joined.includes(kw));
+}
+
+function nameMatch(fileName: string, keywords: string[]): boolean {
+  const lower = fileName.toLowerCase();
+  return keywords.some((kw) => lower.includes(kw));
+}
+
+function extractLastRowValue(rows: Record<string, string>[], colKeywords: string[]): string | undefined {
+  if (!rows.length) return undefined;
+  const lastRows = rows.slice(-3);
+  for (const kw of colKeywords) {
+    for (const row of [...lastRows].reverse()) {
+      for (const [col, val] of Object.entries(row)) {
+        if (col.toLowerCase().includes(kw) && val.trim()) return val.trim();
+      }
+    }
+  }
+  return undefined;
+}
+
+function extractSignalsFromUploadedFiles(
+  uploadedFiles: UploadedSource[],
+  selectedDomain: DomainId,
+): UploadedFileSignal[] {
+  const signals: UploadedFileSignal[] = [];
+  const csvFiles = uploadedFiles.filter((f) => f.extension === "csv" && f.status === "parsed" && f.columns);
+
+  for (const file of csvFiles) {
+    const cols = file.columns || [];
+    const rows = file.parsedRows || [];
+    const domain = (file.detectedDomain as DomainId) || selectedDomain;
+    const fn = file.name.toLowerCase();
+
+    // ── Freight rules ──
+    if (domain === "freight" || selectedDomain === "freight") {
+      // Port congestion
+      if (nameMatch(fn, ["congestion"]) || headersMatch(cols, ["congestion", "waiting", "queue", "delay"])) {
+        const congVal = extractLastRowValue(rows, ["congestion", "waiting", "queue", "delay"]);
+        const region = extractLastRowValue(rows, ["port", "region"]);
+        const evidenceParts: string[] = [];
+        if (region) evidenceParts.push(`Region: ${region}`);
+        if (congVal) evidenceParts.push(`Latest congestion/waiting value: ${congVal}`);
+        if (!evidenceParts.length) evidenceParts.push(`${rows.length} rows of port congestion data`);
+        signals.push({
+          fileName: file.name,
+          domain: "freight",
+          sourceCategory: "Structured data source",
+          signal: "Asia-Pacific port congestion remains elevated",
+          direction: "Bullish",
+          strength: rows.length > 5 ? "High" : "Medium",
+          confidence: rows.length > 5 ? 82 : 78,
+          evidence: evidenceParts.join("; "),
+          forecastUse: "Route-rate upward pressure / capacity absorption",
+        });
+        continue;
+      }
+
+      // Fuel costs — MUST be checked before rate/index to avoid misclassification
+      if (nameMatch(fn, ["fuel", "bunker", "vlsfo", "cost_pressure", "offset_signal"]) || headersMatch(cols, ["fuel", "bunker", "vlsfo", "spread", "cost_pressure", "offset_signal"])) {
+        const priceVal = extractLastRowValue(rows, ["price", "cost"]);
+        const hubVal = extractLastRowValue(rows, ["hub"]);
+        const changeVal = extractLastRowValue(rows, ["change", "delta"]);
+        const evidenceParts: string[] = [];
+        if (hubVal) evidenceParts.push(`Hub: ${hubVal}`);
+        if (priceVal) evidenceParts.push(`Latest fuel cost: $${priceVal}`);
+        if (changeVal) evidenceParts.push(`Change: ${changeVal}%`);
+        if (!evidenceParts.length) evidenceParts.push(`${rows.length} rows of fuel cost data`);
+        const isEasing = changeVal && parseFloat(changeVal) < 0;
+        signals.push({
+          fileName: file.name,
+          domain: "freight",
+          sourceCategory: "Structured data source",
+          signal: "Bunker fuel easing provides a partial cost-pressure offset",
+          direction: isEasing ? "Bearish" : "Mixed",
+          strength: "Medium",
+          confidence: 72,
+          evidence: evidenceParts.join("; "),
+          forecastUse: "Cost-pressure offset",
+        });
+        continue;
+      }
+
+      // Rate index
+      if (nameMatch(fn, ["rate"]) || headersMatch(cols, ["rate", "index"])) {
+        const rateVal = extractLastRowValue(rows, ["rate", "index"]);
+        const yoyVal = extractLastRowValue(rows, ["yoy"]);
+        const wowVal = extractLastRowValue(rows, ["wow"]);
+        const evidenceParts: string[] = [];
+        if (rateVal) evidenceParts.push(`Latest rate/index: ${rateVal}`);
+        if (yoyVal) evidenceParts.push(`YoY: ${yoyVal}`);
+        if (wowVal) evidenceParts.push(`WoW: ${wowVal}`);
+        if (!evidenceParts.length) evidenceParts.push(`${rows.length} rows of freight rate data`);
+        const hasYoYPositive = yoyVal && parseFloat(yoyVal) > 0;
+        const hasWoWNeg = wowVal && parseFloat(wowVal) < 0;
+        const dir: "Mixed" | "Bullish" = (hasYoYPositive && hasWoWNeg) ? "Mixed" : "Bullish";
+        signals.push({
+          fileName: file.name,
+          domain: "freight",
+          sourceCategory: "Structured data source",
+          signal: "Freight rate pressure is mixed but still elevated versus prior period",
+          direction: dir,
+          strength: "Medium",
+          confidence: dir === "Mixed" ? 74 : 78,
+          evidence: evidenceParts.join("; "),
+          forecastUse: "Near-term rate direction feature",
+        });
+        continue;
+      }
+    }
+
+    // ── Mining rules ──
+    if (domain === "mining" || selectedDomain === "mining") {
+      if (headersMatch(cols, ["inventory", "stock"]) || nameMatch(fn, ["inventory", "stock"])) {
+        const val = extractLastRowValue(rows, ["inventory", "stock", "level"]);
+        signals.push({
+          fileName: file.name, domain: "mining", sourceCategory: "Structured data source",
+          signal: "Inventory drawdown supports upward price pressure",
+          direction: "Bullish", strength: "Medium", confidence: 76,
+          evidence: val ? `Latest inventory/stock value: ${val}` : `${rows.length} rows of inventory data`,
+          forecastUse: "Supply-tightness feature",
+        });
+        continue;
+      }
+      if (headersMatch(cols, ["production", "mine", "output"]) || nameMatch(fn, ["production", "mine"])) {
+        const val = extractLastRowValue(rows, ["production", "output"]);
+        signals.push({
+          fileName: file.name, domain: "mining", sourceCategory: "Structured data source",
+          signal: "Production disruption increases supply risk",
+          direction: "Bullish", strength: "High", confidence: 78,
+          evidence: val ? `Latest production value: ${val}` : `${rows.length} rows of production data`,
+          forecastUse: "Supply-disruption feature",
+        });
+        continue;
+      }
+      if (headersMatch(cols, ["shipment", "logistics"]) || nameMatch(fn, ["shipment"])) {
+        const val = extractLastRowValue(rows, ["shipment", "volume"]);
+        signals.push({
+          fileName: file.name, domain: "mining", sourceCategory: "Structured data source",
+          signal: "Shipment delays tighten nearby availability",
+          direction: "Bullish", strength: "Medium", confidence: 74,
+          evidence: val ? `Latest shipment value: ${val}` : `${rows.length} rows of shipment data`,
+          forecastUse: "Logistics-pressure feature",
+        });
+        continue;
+      }
+      if (headersMatch(cols, ["smelter", "demand"]) || nameMatch(fn, ["smelter"])) {
+        const val = extractLastRowValue(rows, ["smelter", "demand"]);
+        signals.push({
+          fileName: file.name, domain: "mining", sourceCategory: "Structured data source",
+          signal: "Smelter demand supports consumption signal",
+          direction: "Bullish", strength: "Medium", confidence: 72,
+          evidence: val ? `Latest smelter/demand value: ${val}` : `${rows.length} rows of smelter data`,
+          forecastUse: "Demand-pressure feature",
+        });
+        continue;
+      }
+      if (headersMatch(cols, ["copper", "lithium", "nickel", "commodity"]) || nameMatch(fn, ["copper", "lithium", "nickel", "commodity"])) {
+        const val = extractLastRowValue(rows, ["price", "value", "index"]);
+        signals.push({
+          fileName: file.name, domain: "mining", sourceCategory: "Structured data source",
+          signal: "Commodity price signal detected",
+          direction: "Bullish", strength: "Medium", confidence: 70,
+          evidence: val ? `Latest price/value: ${val}` : `${rows.length} rows of commodity data`,
+          forecastUse: "Price-direction feature",
+        });
+        continue;
+      }
+    }
+
+    // ── Agriculture rules ──
+    if (domain === "agriculture" || selectedDomain === "agriculture") {
+      if (headersMatch(cols, ["weather", "rainfall", "drought"]) || nameMatch(fn, ["weather", "rainfall", "drought"])) {
+        const val = extractLastRowValue(rows, ["rainfall", "weather", "drought", "index"]);
+        signals.push({
+          fileName: file.name, domain: "agriculture", sourceCategory: "Structured data source",
+          signal: "Weather stress raises yield risk",
+          direction: "Bullish", strength: "Medium", confidence: 74,
+          evidence: val ? `Latest weather/rainfall value: ${val}` : `${rows.length} rows of weather data`,
+          forecastUse: "Yield-risk feature",
+        });
+        continue;
+      }
+      if (headersMatch(cols, ["export", "inspection"]) || nameMatch(fn, ["export"])) {
+        const val = extractLastRowValue(rows, ["export", "volume", "inspection"]);
+        signals.push({
+          fileName: file.name, domain: "agriculture", sourceCategory: "Structured data source",
+          signal: "Export inspections support demand",
+          direction: "Bullish", strength: "Medium", confidence: 76,
+          evidence: val ? `Latest export value: ${val}` : `${rows.length} rows of export data`,
+          forecastUse: "Demand-confirmation feature",
+        });
+        continue;
+      }
+      if (headersMatch(cols, ["stock_to_use", "stock"]) || nameMatch(fn, ["stock"])) {
+        const val = extractLastRowValue(rows, ["stock", "ratio", "use"]);
+        signals.push({
+          fileName: file.name, domain: "agriculture", sourceCategory: "Structured data source",
+          signal: "Stock-to-use tightening supports upward pressure",
+          direction: "Bullish", strength: "High", confidence: 78,
+          evidence: val ? `Latest stock/ratio value: ${val}` : `${rows.length} rows of stock data`,
+          forecastUse: "Supply-tightness feature",
+        });
+        continue;
+      }
+      if (headersMatch(cols, ["crop", "yield", "planting"]) || nameMatch(fn, ["crop", "yield", "planting"])) {
+        const val = extractLastRowValue(rows, ["yield", "planting", "progress"]);
+        signals.push({
+          fileName: file.name, domain: "agriculture", sourceCategory: "Structured data source",
+          signal: "Planting progress changes seasonal risk",
+          direction: "Mixed", strength: "Medium", confidence: 70,
+          evidence: val ? `Latest yield/planting value: ${val}` : `${rows.length} rows of crop data`,
+          forecastUse: "Seasonal-risk feature",
+        });
+        continue;
+      }
+    }
+
+    // ── Generic fallback for unmatched CSV files ──
+    if (cols.length > 0) {
+      signals.push({
+        fileName: file.name,
+        domain: (domain as DomainId) || "unknown",
+        sourceCategory: "Structured data source",
+        signal: `Structured data detected (${cols.length} columns, ${rows.length} rows)`,
+        direction: "Neutral",
+        strength: "Low",
+        confidence: 55,
+        evidence: `Columns: ${cols.slice(0, 5).join(", ")}`,
+        forecastUse: "Generic structured input",
+      });
+    }
+  }
+
+  return signals;
+}
+
+// ── Combined readout ──────────────────────────────────────────────────────
+
+interface CombinedReadout {
+  outlook: string;
+  outlookColor: string;
+  confidence: string;
+  confidenceNum: number;
+  horizon: string;
+  upwardDrivers: string[];
+  offsets: string[];
+  watchlist: string[];
+  sourceCount: number;
+  signalCount: number;
+  reasoning: string;
+}
+
+function buildCombinedReadout(
+  domain: DomainId,
+  parsedResult: ParsedResult | null,
+  csvSignals: UploadedFileSignal[],
+  uploadedFiles: UploadedSource[],
+): CombinedReadout {
+  const domLabel = DOMAINS[domain].label.toLowerCase();
+  const horizonMap: Record<DomainId, string> = { mining: "2\u20134 weeks", freight: "2\u20134 weeks", agriculture: "3\u20136 weeks", custom: "2\u20134 weeks" };
+
+  const allDirections: { direction: string; strength: string; signal: string }[] = [];
+
+  if (parsedResult) {
+    for (const s of parsedResult.extractedSignals) {
+      allDirections.push({ direction: s.direction, strength: s.strength >= 75 ? "High" : s.strength >= 50 ? "Medium" : "Low", signal: s.label });
+    }
+  }
+  for (const s of csvSignals) {
+    allDirections.push({ direction: s.direction, strength: s.strength, signal: s.signal });
+  }
+
+  const bullish = allDirections.filter((d) => d.direction === "Bullish");
+  const bearish = allDirections.filter((d) => d.direction === "Bearish");
+  const mixed = allDirections.filter((d) => d.direction === "Mixed");
+
+  const upwardDrivers = bullish.map((d) => d.signal);
+  const offsets = bearish.map((d) => d.signal);
+  const watchlist = mixed.map((d) => d.signal).concat(allDirections.filter((d) => d.direction === "Watch").map((d) => d.signal));
+
+  // Score: Bullish High +3, Med +2, Low +1; Bearish High -3, Med -2, Low -1; Mixed +0.5 if net bullish
+  const strengthScore = (s: string, dir: string): number => {
+    const base = s === "High" ? 3 : s === "Medium" ? 2 : 1;
+    if (dir === "Bullish") return base;
+    if (dir === "Bearish") return -base;
+    return 0;
+  };
+  const netScore = allDirections.reduce((acc, d) => acc + strengthScore(d.strength, d.direction), 0)
+    + mixed.length * (bullish.length > bearish.length ? 0.5 : 0);
+
+  let outlook: string;
+  let outlookColor: string;
+  if (netScore >= 4) { outlook = "Bullish"; outlookColor = C.green; }
+  else if (netScore >= 1.5) { outlook = "Mildly bullish"; outlookColor = C.green; }
+  else if (netScore > -1.5) { outlook = "Mixed"; outlookColor = C.amber; }
+  else { outlook = "Bearish"; outlookColor = C.red; }
+
+  // Confidence: weighted average of all signals
+  const confValues = [
+    ...(parsedResult ? parsedResult.extractedSignals.map((s) => s.confidence) : []),
+    ...csvSignals.map((s) => s.confidence),
+  ];
+  const avgConf = confValues.length > 0 ? Math.round(confValues.reduce((a, b) => a + b, 0) / confValues.length) : 0;
+  const confLabel = avgConf >= 75 ? "medium-high" : avgConf >= 60 ? "moderate" : "low";
+
+  const sourceCount = uploadedFiles.length + (parsedResult?.urlSource ? 1 : 0) + (parsedResult?.noteSnippet ? 1 : 0);
+  const signalCount = allDirections.length;
+
+  const driversText = upwardDrivers.length > 0 ? `Upward drivers: ${upwardDrivers.join(", ")}.` : "";
+  const offsetText = offsets.length > 0 ? `${offsets.join(", ")} ${offsets.length === 1 ? "is" : "are"} a partial offset.` : "";
+  const reasoning = `${outlook} ${domLabel} outlook over ${horizonMap[domain]}. ${driversText} ${offsetText} Confidence is ${confLabel} (${avgConf}%) based on ${signalCount} directional signal${signalCount !== 1 ? "s" : ""} from ${sourceCount} source${sourceCount !== 1 ? "s" : ""}.`.replace(/  +/g, " ").trim();
+
+  return {
+    outlook, outlookColor,
+    confidence: `${avgConf}%`, confidenceNum: avgConf,
+    horizon: horizonMap[domain],
+    upwardDrivers, offsets, watchlist,
+    sourceCount, signalCount, reasoning,
+  };
+}
+
+// ── Chart adjustment ─────────────────────────────────────────────────────
+
+type ChartRow = { period: string; actual?: number; forecast?: number; lower?: number; bandWidth?: number };
+
+function computeSignalScore(csvSignals: UploadedFileSignal[]): number {
+  let score = 0;
+  for (const s of csvSignals) {
+    const base = s.strength === "High" ? 3 : s.strength === "Medium" ? 2 : 1;
+    if (s.direction === "Bullish") score += base;
+    else if (s.direction === "Bearish") score -= base;
+    else if (s.direction === "Mixed") score += 0.5;
+  }
+  return score;
+}
+
+function adjustChartData(
+  baseData: ChartRow[],
+  csvSignals: UploadedFileSignal[],
+): { chartData: ChartRow[]; adjusted: boolean } {
+  if (csvSignals.length === 0) return { chartData: baseData, adjusted: false };
+
+  const score = computeSignalScore(csvSignals);
+  // Per forecast step: shift = score * 0.35, cumulative. Mild effect.
+  const shiftPerStep = score * 0.35;
+  // Band adjustment: bearish signals widen uncertainty slightly
+  const bearishCount = csvSignals.filter((s) => s.direction === "Bearish" || s.direction === "Mixed").length;
+  const bandExtra = bearishCount * 0.8;
+
+  let forecastIdx = 0;
+  const adjusted = baseData.map((row) => {
+    if (row.forecast !== undefined && row.actual === undefined) {
+      forecastIdx++;
+      const shift = shiftPerStep * forecastIdx;
+      const newForecast = +(row.forecast + shift).toFixed(1);
+      const newBandWidth = row.bandWidth !== undefined ? +(row.bandWidth + bandExtra * forecastIdx * 0.3).toFixed(1) : undefined;
+      const newLower = row.lower !== undefined && newBandWidth !== undefined ? +(newForecast - newBandWidth).toFixed(1) : row.lower;
+      return { ...row, forecast: newForecast, lower: newLower, bandWidth: newBandWidth };
+    }
+    // Transition point (has both actual and forecast)
+    if (row.forecast !== undefined && row.actual !== undefined) {
+      return { ...row };
+    }
+    return row;
+  });
+
+  return { chartData: adjusted, adjusted: true };
+}
+
+function buildAdjustedMetrics(
+  baseMetrics: { label: string; value: string; color: string }[],
+  csvSignals: UploadedFileSignal[],
+  readout: CombinedReadout,
+): { label: string; value: string; color: string }[] {
+  if (csvSignals.length === 0) return baseMetrics;
+  return baseMetrics.map((m) => {
+    if (m.label === "Forecast bias") return { ...m, value: readout.outlook, color: readout.outlookColor };
+    if (m.label === "Confidence") return { ...m, value: readout.confidence };
+    if (m.label === "Model mode") return { ...m, value: "Source-adjusted" };
+    return m;
+  });
+}
+
+function buildAdjustedSummaryMetrics(
+  baseMetrics: { label: string; value: string; color: string }[],
+  readout: CombinedReadout | null,
+): { label: string; value: string; color: string }[] {
+  if (!readout) return baseMetrics;
+  return baseMetrics.map((m) => {
+    if (m.label === "Forecast pressure") return { ...m, value: readout.outlook, color: readout.outlookColor };
+    if (m.label === "Confidence") return { ...m, value: readout.confidence };
+    return m;
+  });
+}
+
+// ── Short feature key helper ─────────────────────────────────────────────
+
+const SIGNAL_KEY_MAP: Record<string, string> = {
+  "Asia-Pacific port congestion remains elevated": "port_congestion_pressure",
+  "Freight rate pressure is mixed but still elevated versus prior period": "freight_rate_pressure",
+  "Bunker fuel easing provides a partial cost-pressure offset": "bunker_fuel_offset",
+  "Bunker fuel easing provides partial offset": "bunker_fuel_offset",
+  "Inventory drawdown supports upward price pressure": "inventory_drawdown",
+  "Production disruption increases supply risk": "production_disruption",
+  "Shipment delays tighten nearby availability": "vessel_delay_pressure",
+  "Smelter demand supports consumption signal": "smelter_demand",
+  "Commodity price signal detected": "commodity_price_signal",
+  "Weather stress raises yield risk": "weather_yield_risk",
+  "Export inspections support demand": "export_demand",
+  "Stock-to-use tightening supports upward pressure": "stock_to_use_tightening",
+  "Planting progress changes seasonal risk": "planting_seasonal_risk",
+};
+
+function signalToFeatureKey(signal: string): string {
+  return SIGNAL_KEY_MAP[signal] || signal.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 28);
+}
+
+// ── Active intelligence state ─────────────────────────────────────────────
+
+interface ActiveIntelligence {
+  hasSourceInput: boolean;
+  signals: Signal[];
+  drivers: { name: string; contribution: number }[];
+  reasoning: { headline: string; body: string };
+  chartEvents: { period: string; value: number; label: string }[];
+  summaryMetrics: { label: string; value: string; color: string }[];
+  chartMetrics: { label: string; value: string; color: string }[];
+  risks: string[];
+  features: { name: string; value: number; direction: string; directionColor: string; source: string }[];
+  evidence: string[];
+}
+
+function getActiveIntelligence(
+  domain: DomainId,
+  parsedResult: ParsedResult | null,
+  csvSignals: UploadedFileSignal[],
+  combinedReadout: CombinedReadout | null,
+): ActiveIntelligence {
+  const d = DOMAINS[domain];
+  const baseDc = DOMAIN_CHARTS[domain];
+
+  // Collect all source-derived signals
+  const noteSignals: ParsedSignal[] = parsedResult
+    ? parsedResult.extractedSignals.filter((s) => s.label !== "General market signal")
+    : [];
+  const hasSourceInput = noteSignals.length > 0 || csvSignals.length > 0;
+
+  if (!hasSourceInput) {
+    return {
+      hasSourceInput: false,
+      signals: d.signals,
+      drivers: d.drivers,
+      reasoning: d.reasoning,
+      chartEvents: baseDc.events,
+      summaryMetrics: baseDc.summaryMetrics,
+      chartMetrics: baseDc.metrics,
+      risks: d.brief.risks,
+      features: d.brief.features,
+      evidence: d.brief.evidence,
+    };
+  }
+
+  // Build signals table rows from source-derived signals
+  const dirColor = (dir: string) => dir === "Bullish" ? C.green : dir === "Bearish" ? C.red : dir === "Mixed" ? C.amber : "#6b7280";
+  const activeSignals: Signal[] = [
+    ...noteSignals.map((s) => ({
+      name: s.label,
+      direction: s.direction,
+      directionColor: s.directionColor,
+      strength: s.strength,
+      confidence: `${s.confidence}%`,
+    })),
+    ...csvSignals.map((s) => ({
+      name: s.signal,
+      direction: s.direction,
+      directionColor: dirColor(s.direction),
+      strength: s.strength === "High" ? 82 : s.strength === "Medium" ? 68 : 50,
+      confidence: `${s.confidence}%`,
+    })),
+  ];
+
+  // Build drivers from source signals
+  const allSigEntries = [
+    ...noteSignals.map((s) => ({ name: s.label, dir: s.direction, str: s.strength })),
+    ...csvSignals.map((s) => ({ name: s.signal, dir: s.direction, str: s.strength === "High" ? 82 : s.strength === "Medium" ? 68 : 50 })),
+  ];
+  const activeDrivers = allSigEntries
+    .sort((a, b) => b.str - a.str)
+    .slice(0, 6)
+    .map((s) => ({
+      name: s.name,
+      contribution: s.dir === "Bullish" ? Math.round(s.str * 0.35)
+        : s.dir === "Bearish" ? -Math.round(s.str * 0.25)
+        : Math.round(s.str * 0.1),
+    }));
+
+  // Build reasoning
+  const readout = combinedReadout;
+  const headline = readout ? `${readout.outlook} outlook` : parsedResult?.forecastImpact || "Source-derived intelligence";
+  const body = readout?.reasoning || parsedResult?.reasoning || d.reasoning.body;
+
+  // Build chart events from top 2-3 source signals
+  const chartBase = baseDc.chartData;
+  const actualPoints = chartBase.filter((r) => r.actual !== undefined);
+  const eventCandidates = activeSignals.slice(0, 3);
+  const eventPeriods = actualPoints.length >= 3
+    ? [actualPoints[Math.floor(actualPoints.length * 0.4)], actualPoints[Math.floor(actualPoints.length * 0.8)], actualPoints[actualPoints.length - 1]]
+    : actualPoints.slice(-3);
+  const activeEvents = eventCandidates.map((sig, i) => {
+    const pt = eventPeriods[i] || eventPeriods[eventPeriods.length - 1];
+    return { period: pt.period, value: pt.actual || 100, label: `${sig.name.slice(0, 30)} parsed` };
+  });
+
+  // Summary metrics
+  const outlookVal = readout?.outlook || parsedResult?.forecastImpact || "Mixed";
+  const outlookCol = readout?.outlookColor || (outlookVal.includes("Bullish") || outlookVal.includes("bullish") ? C.green : C.amber);
+  const confVal = readout?.confidence || `${parsedResult?.confidence || 65}%`;
+  const mixedCount = activeSignals.filter((s) => s.direction === "Mixed" || s.direction === "Watch").length;
+  const volRisk = mixedCount >= 3 ? "High" : mixedCount >= 1 ? "Medium" : "Low";
+  const volColor = volRisk === "High" ? C.red : volRisk === "Medium" ? C.amber : C.green;
+  const horizon = readout?.horizon || (domain === "agriculture" ? "3\u20136 weeks" : "2\u20134 weeks");
+
+  const activeSummaryMetrics = [
+    { label: "Forecast pressure", value: outlookVal, color: outlookCol },
+    { label: "Confidence", value: confVal, color: C.text },
+    { label: "Volatility risk", value: volRisk, color: volColor },
+    { label: "Horizon", value: horizon, color: C.text },
+  ];
+
+  // Chart right-side metrics
+  const topDriver = activeDrivers.length > 0 ? activeDrivers[0].name : "Source signals";
+  const activeChartMetrics = [
+    { label: "Forecast bias", value: outlookVal, color: outlookCol },
+    { label: "30-day signal change", value: readout ? (readout.confidenceNum >= 70 ? "+2.8%" : "+1.4%") : "+1.0%", color: C.green },
+    { label: "Confidence", value: confVal, color: C.text },
+    { label: "Uncertainty band", value: mixedCount >= 2 ? "\u00B18.5%" : "\u00B15.4%", color: mixedCount >= 2 ? C.amber : C.text },
+    { label: "Top driver", value: topDriver.length > 28 ? topDriver.slice(0, 26) + "\u2026" : topDriver, color: C.text },
+    { label: "Model mode", value: "Source-adjusted", color: C.textMuted },
+  ];
+
+  // Features for Screen 3
+  const activeFeatures = [
+    ...noteSignals.slice(0, 5).map((s) => ({
+      name: signalToFeatureKey(s.label),
+      value: +(s.strength / 100).toFixed(2),
+      direction: s.direction,
+      directionColor: s.directionColor,
+      source: parsedResult?.urlSource ? "URL" : "Note",
+    })),
+    ...csvSignals.map((s) => ({
+      name: signalToFeatureKey(s.signal),
+      value: +(s.confidence / 100).toFixed(2),
+      direction: s.direction as string,
+      directionColor: dirColor(s.direction),
+      source: "CSV",
+    })),
+  ];
+
+  // Evidence
+  const activeEvidence = [
+    ...(parsedResult?.urlSource ? [`URL source: ${parsedResult.urlSource}`] : []),
+    ...(parsedResult?.noteSnippet ? [`Parsed note: ${parsedResult.noteSnippet}`] : []),
+    ...csvSignals.map((s) => `${s.fileName}: ${s.evidence}`),
+  ];
+
+  // Risks from combined readout watchlist + offsets
+  const activeRisks = [
+    ...(readout?.watchlist || []).map((w) => `${w} remains a risk factor`),
+    ...(readout?.offsets || []).map((o) => `${o} may reverse`),
+    ...(activeRisks_remaining(activeSignals)),
+  ].slice(0, 4);
+
+  return {
+    hasSourceInput: true,
+    signals: activeSignals,
+    drivers: activeDrivers,
+    reasoning: { headline, body },
+    chartEvents: activeEvents,
+    summaryMetrics: activeSummaryMetrics,
+    chartMetrics: activeChartMetrics,
+    risks: activeRisks.length > 0 ? activeRisks : d.brief.risks,
+    features: activeFeatures.length > 0 ? activeFeatures : d.brief.features,
+    evidence: activeEvidence.length > 0 ? activeEvidence : d.brief.evidence,
+  };
+}
+
+function activeRisks_remaining(signals: Signal[]): string[] {
+  const highStr = signals.filter((s) => s.strength >= 75 && (s.direction === "Bullish" || s.direction === "Mixed"));
+  return highStr.length > 0 ? [`Signal concentration risk — ${highStr.length} high-strength indicator${highStr.length > 1 ? "s" : ""}`] : [];
 }
 
 // ── AddDomainModal ──────────────────────────────────────────────────────────
@@ -827,7 +1535,7 @@ function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name:
 
 function SignalIntake({
   domain, setDomain, onGenerate, onAddDomain, customLabel, parsedResult,
-  uploadedFiles, onFilesUploaded,
+  uploadedFiles, onFilesUploaded, csvSignals,
 }: {
   domain: DomainId;
   setDomain: (d: DomainId) => void;
@@ -837,6 +1545,7 @@ function SignalIntake({
   parsedResult: ParsedResult | null;
   uploadedFiles: UploadedSource[];
   onFilesUploaded: (files: UploadedSource[], txtContent: string | null) => void;
+  csvSignals: UploadedFileSignal[];
 }) {
   const [dropOpen, setDropOpen] = useState(false);
   const [url, setUrl] = useState("");
@@ -936,6 +1645,9 @@ function SignalIntake({
                 fontSize: "13px", color: C.text, outline: "none", boxSizing: "border-box", fontFamily: "inherit",
               }}
             />
+            <p style={{ fontSize: "11px", color: C.textFaint, margin: "4px 0 0" }}>
+              Demo mode: URL text is interpreted locally; no live scraping
+            </p>
           </div>
 
           <div style={{ marginTop: "22px" }}>
@@ -1022,6 +1734,34 @@ function SignalIntake({
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {csvSignals.length > 0 && (
+              <div style={{ marginTop: "14px" }}>
+                <p style={{ fontSize: "12px", fontWeight: 600, color: C.text, margin: "0 0 8px" }}>CSV-derived signals</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  {csvSignals.map((sig, i) => {
+                    const dirColor = sig.direction === "Bullish" ? C.green : sig.direction === "Bearish" ? C.red : sig.direction === "Mixed" ? C.amber : C.textMuted;
+                    return (
+                      <div key={i} style={{
+                        padding: "10px 13px", background: "rgba(22,163,74,0.04)",
+                        border: `1px solid rgba(22,163,74,0.14)`, borderRadius: "8px",
+                      }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "3px" }}>
+                          <span style={{ fontSize: "12px", fontWeight: 500, color: C.text }}>{sig.signal}</span>
+                          <div style={{ display: "flex", gap: "5px" }}>
+                            <span style={{ fontSize: "10px", fontWeight: 500, color: dirColor, padding: "2px 6px", background: `${dirColor}15`, borderRadius: "4px" }}>{sig.direction}</span>
+                            <span style={{ fontSize: "10px", fontWeight: 500, color: C.textMuted, padding: "2px 6px", background: "#f3f4f6", borderRadius: "4px" }}>{sig.strength}</span>
+                          </div>
+                        </div>
+                        <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 2px" }}>{sig.confidence}% confidence</p>
+                        <p style={{ fontSize: "11px", color: C.textFaint, margin: "0 0 2px" }}>{sig.fileName}</p>
+                        <p style={{ fontSize: "11px", color: C.textFaint, margin: 0 }}>{sig.evidence}</p>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>
@@ -1139,28 +1879,28 @@ function SignalIntake({
             </>
           )}
 
-          {uploadedFiles.length > 0 && (
-            <div style={{ marginTop: "14px", display: "flex", flexDirection: "column", gap: "4px" }}>
-              <p style={{ fontSize: "11px", fontWeight: 500, color: C.textMuted, margin: "0 0 2px" }}>Upload status</p>
-              {uploadedFiles.map((uf) => {
-                const statusText = uf.extension === "txt" ? "Local file accepted — content added to note field"
-                  : uf.extension === "csv" ? `CSV headers detected — ${uf.rowCount} rows, ${uf.columnCount} columns`
-                  : uf.extension === "json" ? "JSON parsed — source preview prepared"
-                  : "Unsupported file type";
-                const isOk = uf.status === "parsed";
-                return (
-                  <div key={uf.id} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                    <span style={{ fontSize: "11px", color: isOk ? C.green : C.amber }}>{isOk ? "\u2713" : "\u26A0"}</span>
-                    <span style={{ fontSize: "11px", color: C.textSec }}>{uf.name}: {statusText}</span>
+          {uploadedFiles.length > 0 && (() => {
+            const parsedCount = uploadedFiles.filter((f) => f.status === "parsed").length;
+            const csvCount = uploadedFiles.filter((f) => f.extension === "csv" && f.status === "parsed").length;
+            const domainAligned = uploadedFiles.filter((f) => f.detectedDomain === domain).length;
+            const steps = [
+              { text: `${parsedCount} local source file${parsedCount !== 1 ? "s" : ""} parsed`, ok: parsedCount > 0 },
+              ...(csvCount > 0 ? [{ text: `${csvSignals.length} structured CSV signal${csvSignals.length !== 1 ? "s" : ""} prepared`, ok: csvSignals.length > 0 }] : []),
+              ...(domainAligned > 0 ? [{ text: `${domainAligned} file${domainAligned !== 1 ? "s" : ""} aligned to ${DOMAINS[domain].label}`, ok: true }] : []),
+              { text: "Ready for combined intelligence", ok: true },
+            ];
+            return (
+              <div style={{ marginTop: "14px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                <p style={{ fontSize: "11px", fontWeight: 500, color: C.textMuted, margin: "0 0 2px" }}>Source pack status</p>
+                {steps.map((s, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ fontSize: "11px", color: s.ok ? C.green : C.amber }}>{s.ok ? "\u2713" : "\u26A0"}</span>
+                    <span style={{ fontSize: "11px", color: s.ok ? C.textSec : C.amber }}>{s.text}</span>
                   </div>
-                );
-              })}
-              <div style={{ display: "flex", alignItems: "center", gap: "6px", marginTop: "2px" }}>
-                <span style={{ fontSize: "11px", color: C.green }}>{"\u2713"}</span>
-                <span style={{ fontSize: "11px", color: C.green, fontWeight: 500 }}>Ready for signal generation</span>
+                ))}
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           <button
             onClick={() => onGenerate(url, note)}
@@ -1178,16 +1918,30 @@ function SignalIntake({
 
 // ── Screen 2: Signal Intelligence ──────────────────────────────────────────
 
-function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: DomainId; onGenerate: () => void; parsedResult: ParsedResult | null }) {
-  const d = DOMAINS[domain];
-  const dc = DOMAIN_CHARTS[domain];
+function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, combinedReadout, activeIntel }: { domain: DomainId; onGenerate: () => void; parsedResult: ParsedResult | null; csvSignals: UploadedFileSignal[]; combinedReadout: CombinedReadout | null; activeIntel: ActiveIntelligence }) {
+  const baseDc = DOMAIN_CHARTS[domain];
+  const hasSource = activeIntel.hasSourceInput;
+  // Chart: adjust from all source signals (note + CSV)
+  const allSignalScores: UploadedFileSignal[] = [
+    ...(parsedResult ? parsedResult.extractedSignals.filter(s => s.label !== "General market signal").map(s => ({
+      fileName: "note", domain: domain as DomainId, sourceCategory: "Note", signal: s.label,
+      direction: (s.direction === "Bullish" ? "Bullish" : s.direction === "Bearish" ? "Bearish" : s.direction === "Mixed" ? "Mixed" : "Neutral") as "Bullish" | "Bearish" | "Mixed" | "Neutral",
+      strength: (s.strength >= 75 ? "High" : s.strength >= 50 ? "Medium" : "Low") as "Low" | "Medium" | "High",
+      confidence: s.confidence, evidence: s.evidence, forecastUse: "",
+    })) : []),
+    ...csvSignals,
+  ];
+  const { chartData: adjustedChartData, adjusted: chartIsAdjusted } = adjustChartData(baseDc.chartData, allSignalScores);
+  const chartEvents = hasSource ? activeIntel.chartEvents : baseDc.events;
+  const summaryMetrics = hasSource ? activeIntel.summaryMetrics : baseDc.summaryMetrics;
+  const chartMetrics = hasSource ? activeIntel.chartMetrics : baseDc.metrics;
 
   return (
     <div>
 
       {/* Metric cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "12px", marginBottom: "18px" }}>
-        {dc.summaryMetrics.map((m) => (
+        {summaryMetrics.map((m) => (
           <div key={m.label} style={{ ...card, padding: "12px 16px" }}>
             <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 4px" }}>{m.label}</p>
             <p style={{ fontSize: "18px", fontWeight: 700, color: m.color, margin: 0 }}>{m.value}</p>
@@ -1210,7 +1964,7 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
             ))}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: "3px", marginTop: "6px" }}>
-            {d.signals.map((sig, i) => (
+            {activeIntel.signals.map((sig, i) => (
               <div key={i} style={{
                 display: "grid", gridTemplateColumns: "1fr 90px 1fr 80px",
                 alignItems: "center", padding: "11px 13px",
@@ -1239,19 +1993,19 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
             borderRadius: "9px", padding: "14px", marginBottom: "18px",
           }}>
             <p style={{ fontSize: "13px", fontWeight: 600, color: C.green, margin: "0 0 7px" }}>
-              {d.reasoning.headline}
+              {activeIntel.reasoning.headline}
             </p>
             <p style={{ fontSize: "12px", color: C.textSec, margin: 0, lineHeight: 1.6 }}>
-              {d.reasoning.body}
+              {activeIntel.reasoning.body}
             </p>
           </div>
           <h4 style={{ fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 10px" }}>Top drivers</h4>
           <div style={{ flex: 1 }}>
-            {d.drivers.map((dr, i) => (
+            {activeIntel.drivers.map((dr, i) => (
               <div key={i} style={{
                 display: "flex", justifyContent: "space-between", alignItems: "center",
                 padding: "10px 0",
-                borderBottom: i < d.drivers.length - 1 ? `1px solid ${C.borderSub}` : "none",
+                borderBottom: i < activeIntel.drivers.length - 1 ? `1px solid ${C.borderSub}` : "none",
               }}>
                 <span style={{ fontSize: "13px", color: C.textSec }}>{dr.name}</span>
                 <span style={{ fontSize: "13px", fontWeight: 600, color: dr.contribution > 0 ? C.green : C.red }}>
@@ -1271,8 +2025,69 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
         </div>
       </div>
 
-      {/* Latest parsed intelligence */}
-      {parsedResult && (
+      {/* Combined market readout */}
+      {combinedReadout && (csvSignals.length > 0 || (parsedResult && parsedResult.extractedSignals.some(s => s.direction !== "Watch" || s.confidence > 55))) && (
+        <div style={{ ...card, marginTop: "18px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+            <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: 0 }}>
+              Combined market readout
+            </h3>
+            <span style={{
+              padding: "3px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: 500,
+              background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, color: C.green,
+            }}>{combinedReadout.signalCount} signals / {combinedReadout.sourceCount} sources</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "18px" }}>
+            <div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "12px" }}>
+                <span style={{ padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: 500, background: `${combinedReadout.outlookColor}15`, border: `1px solid ${combinedReadout.outlookColor}30`, color: combinedReadout.outlookColor }}>{combinedReadout.outlook}</span>
+                <span style={{ padding: "4px 10px", borderRadius: "20px", fontSize: "11px", background: "#f3f4f6", border: `1px solid ${C.border}`, color: C.textSec }}>{combinedReadout.confidence} confidence</span>
+                <span style={{ padding: "4px 10px", borderRadius: "20px", fontSize: "11px", background: "#f3f4f6", border: `1px solid ${C.border}`, color: C.textSec }}>{combinedReadout.horizon}</span>
+              </div>
+              {combinedReadout.upwardDrivers.length > 0 && (
+                <div style={{ marginBottom: "8px" }}>
+                  <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 4px" }}>Upward drivers</p>
+                  <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                    {combinedReadout.upwardDrivers.map((d, i) => (
+                      <span key={i} style={{ padding: "3px 7px", borderRadius: "4px", fontSize: "11px", background: "rgba(22,163,74,0.08)", color: C.green }}>{d}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {combinedReadout.offsets.length > 0 && (
+                <div style={{ marginBottom: "8px" }}>
+                  <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 4px" }}>Offsets</p>
+                  <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                    {combinedReadout.offsets.map((d, i) => (
+                      <span key={i} style={{ padding: "3px 7px", borderRadius: "4px", fontSize: "11px", background: "rgba(220,38,38,0.08)", color: C.red }}>{d}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {combinedReadout.watchlist.length > 0 && (
+                <div>
+                  <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 4px" }}>Watchlist</p>
+                  <div style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                    {combinedReadout.watchlist.map((d, i) => (
+                      <span key={i} style={{ padding: "3px 7px", borderRadius: "4px", fontSize: "11px", background: "rgba(217,119,6,0.08)", color: C.amber }}>{d}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div style={{
+              background: "rgba(22,163,74,0.04)", border: `1px solid rgba(22,163,74,0.12)`,
+              borderRadius: "9px", padding: "14px",
+            }}>
+              <p style={{ fontSize: "12px", fontWeight: 600, color: C.green, margin: "0 0 6px" }}>Analyst reasoning</p>
+              <p style={{ fontSize: "12px", color: C.textSec, margin: 0, lineHeight: 1.65 }}>{combinedReadout.reasoning}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Latest parsed intelligence — only show if note/URL produced meaningful signals (not generic fallback) */}
+      {parsedResult && parsedResult.extractedSignals.some(s => s.label !== "General market signal") && (
         <div style={{ ...card, marginTop: "18px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
             <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: 0 }}>
@@ -1281,7 +2096,7 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
             <span style={{
               padding: "3px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: 500,
               background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, color: C.green,
-            }}>Demo parsing</span>
+            }}>Note/URL parsing</span>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "18px" }}>
             <div>
@@ -1312,6 +2127,47 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
         </div>
       )}
 
+      {/* Uploaded source signals */}
+      {csvSignals.length > 0 && (
+        <div style={{ ...card, marginTop: "18px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+            <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: 0 }}>
+              Uploaded source signals
+            </h3>
+            <span style={{
+              padding: "3px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: 500,
+              background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, color: C.green,
+            }}>CSV-derived</span>
+          </div>
+          <div style={{
+            display: "grid", gridTemplateColumns: "1.2fr 1.8fr 80px 70px 1.5fr",
+            padding: "0 13px 10px", borderBottom: `1px solid ${C.borderSub}`,
+          }}>
+            {["Source file", "Signal", "Direction", "Confidence", "Forecast use"].map((h) => (
+              <span key={h} style={{ fontSize: "11px", color: C.textFaint, fontWeight: 500 }}>{h}</span>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "3px", marginTop: "6px" }}>
+            {csvSignals.map((sig, i) => {
+              const dirColor = sig.direction === "Bullish" ? C.green : sig.direction === "Bearish" ? C.red : sig.direction === "Mixed" ? C.amber : C.textMuted;
+              return (
+                <div key={i} style={{
+                  display: "grid", gridTemplateColumns: "1.2fr 1.8fr 80px 70px 1.5fr",
+                  alignItems: "center", padding: "11px 13px",
+                  borderRadius: "7px", background: i % 2 === 0 ? "#fafafa" : "transparent",
+                }}>
+                  <span style={{ fontSize: "12px", color: C.textMuted, fontFamily: "monospace" }}>{sig.fileName}</span>
+                  <span style={{ fontSize: "12px", color: C.text }}>{sig.signal}</span>
+                  <span style={{ fontSize: "12px", color: dirColor, fontWeight: 500 }}>{sig.direction}</span>
+                  <span style={{ fontSize: "12px", color: C.textSec }}>{sig.confidence}%</span>
+                  <span style={{ fontSize: "11px", color: C.textFaint }}>{sig.forecastUse}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Signal-Adjusted Forecast chart */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 240px", gap: "18px", marginTop: "18px" }}>
         <div style={card}>
@@ -1323,7 +2179,7 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
           </p>
           <div style={{ width: "100%", height: 320 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={dc.chartData} margin={{ top: 20, right: 16, bottom: 4, left: 0 }}>
+              <ComposedChart data={adjustedChartData} margin={{ top: 20, right: 16, bottom: 4, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
                 <XAxis
                   dataKey="period"
@@ -1332,7 +2188,7 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
                   tickLine={false}
                 />
                 <YAxis
-                  domain={dc.yDomain}
+                  domain={chartIsAdjusted ? ["auto", "auto"] : baseDc.yDomain}
                   tick={{ fontSize: 11, fill: C.textFaint }}
                   axisLine={false}
                   tickLine={false}
@@ -1399,7 +2255,7 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
                 </ReferenceLine>
 
                 {/* Event markers */}
-                {dc.events.map((evt) => (
+                {chartEvents.map((evt) => (
                   <ReferenceDot
                     key={evt.period}
                     x={evt.period}
@@ -1435,10 +2291,10 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
           <h4 style={{ fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 16px" }}>
             Forecast metrics
           </h4>
-          {dc.metrics.map((m, i) => (
+          {chartMetrics.map((m, i) => (
             <div key={m.label} style={{
               padding: "10px 0",
-              borderBottom: i < dc.metrics.length - 1 ? `1px solid ${C.borderSub}` : "none",
+              borderBottom: i < chartMetrics.length - 1 ? `1px solid ${C.borderSub}` : "none",
             }}>
               <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 3px" }}>{m.label}</p>
               <p style={{ fontSize: "14px", fontWeight: 600, color: m.color, margin: 0 }}>{m.value}</p>
@@ -1450,10 +2306,10 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
             borderRadius: "8px",
           }}>
             <p style={{ fontSize: "11px", color: C.green, margin: 0, fontWeight: 500 }}>
-              Deterministic demo mode
+              {hasSource ? "Source-adjusted demo mode" : "Deterministic demo mode"}
             </p>
             <p style={{ fontSize: "10px", color: C.textMuted, margin: "3px 0 0" }}>
-              Signal-adjusted projection using hardcoded sample data
+              {hasSource ? "Uploaded/entered source signals adjust this deterministic forecast path. No live model/API used." : "Baseline domain sample data. Upload files, paste a URL, or enter a note to adjust."}
             </p>
           </div>
         </div>
@@ -1464,27 +2320,14 @@ function SignalIntelligence({ domain, onGenerate, parsedResult }: { domain: Doma
 
 // ── Screen 3: Forecast Decision Pack ──────────────────────────────────────
 
-function ForecastDecisionPack({ domain, parsedResult }: { domain: DomainId; parsedResult: ParsedResult | null }) {
+function ForecastDecisionPack({ domain, parsedResult, csvSignals, combinedReadout, activeIntel }: { domain: DomainId; parsedResult: ParsedResult | null; csvSignals: UploadedFileSignal[]; combinedReadout: CombinedReadout | null; activeIntel: ActiveIntelligence }) {
   const b = DOMAINS[domain].brief;
-  const allFeatures = parsedResult
-    ? [
-        ...b.features,
-        ...parsedResult.extractedSignals.slice(0, 3).map((s) => ({
-          name: s.label.toLowerCase().replace(/ /g, "_"),
-          value: +(s.strength / 100).toFixed(2),
-          direction: s.direction,
-          directionColor: s.directionColor,
-          source: "Note",
-        })),
-      ]
-    : b.features;
-  const allEvidence = parsedResult
-    ? [
-        ...b.evidence,
-        ...(parsedResult.noteSnippet ? [`Parsed note: ${parsedResult.noteSnippet}`] : []),
-        ...(parsedResult.urlSource ? [`URL source: ${parsedResult.urlSource}`] : []),
-      ]
-    : b.evidence;
+  const allFeatures = activeIntel.hasSourceInput ? activeIntel.features : b.features;
+  const allEvidence = activeIntel.hasSourceInput ? activeIntel.evidence : b.evidence;
+  const briefOutlook = combinedReadout?.outlook || b.outlook;
+  const briefConfidence = combinedReadout?.confidence || b.confidence;
+  const briefOutlookText = combinedReadout?.reasoning || b.outlookText;
+  const risks = activeIntel.hasSourceInput ? activeIntel.risks : b.risks;
 
   return (
     <div>
@@ -1497,8 +2340,8 @@ function ForecastDecisionPack({ domain, parsedResult }: { domain: DomainId; pars
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "18px" }}>
             {[
               { text: `Market: ${b.market}`, green: false },
-              { text: `Outlook: ${b.outlook}`, green: true },
-              { text: `Confidence: ${b.confidence}`, green: false },
+              { text: `Outlook: ${briefOutlook}`, green: true },
+              { text: `Confidence: ${briefConfidence}`, green: false },
             ].map((chip) => (
               <span key={chip.text} style={{
                 padding: "5px 12px", borderRadius: "20px", fontSize: "12px",
@@ -1517,14 +2360,14 @@ function ForecastDecisionPack({ domain, parsedResult }: { domain: DomainId; pars
             padding: "15px", background: "rgba(22,163,74,0.05)",
             border: `1px solid rgba(22,163,74,0.14)`, borderRadius: "8px", marginBottom: "22px",
           }}>
-            <p style={{ fontSize: "13px", color: C.textSec, margin: 0, lineHeight: 1.65 }}>{b.outlookText}</p>
+            <p style={{ fontSize: "13px", color: C.textSec, margin: 0, lineHeight: 1.65 }}>{briefOutlookText}</p>
           </div>
 
           <label style={{ fontSize: "12px", color: C.textMuted, display: "block", marginBottom: "9px" }}>
             Risk watchlist
           </label>
           <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "26px" }}>
-            {b.risks.map((r, i) => (
+            {risks.map((r, i) => (
               <div key={i} style={{
                 padding: "11px 13px", background: "#fafafa",
                 border: `1px solid ${C.borderSub}`, borderRadius: "8px",
@@ -1554,23 +2397,23 @@ function ForecastDecisionPack({ domain, parsedResult }: { domain: DomainId; pars
             <p style={{ fontSize: "12px", color: C.textFaint, margin: "0 0 16px" }}>Training-signal-ready output</p>
 
             <div style={{
-              display: "grid", gridTemplateColumns: "1fr 55px 70px 50px",
+              display: "grid", gridTemplateColumns: "2fr 50px 65px 42px",
               paddingBottom: "8px", borderBottom: `1px solid ${C.borderSub}`,
             }}>
-              {["Feature", "Value", "Direction", "Source"].map((h) => (
+              {["Feature", "Value", "Direction", "Src"].map((h) => (
                 <span key={h} style={{ fontSize: "11px", color: C.textFaint, fontWeight: 500 }}>{h}</span>
               ))}
             </div>
             {allFeatures.map((f, i) => (
               <div key={i} style={{
-                display: "grid", gridTemplateColumns: "1fr 55px 70px 50px",
+                display: "grid", gridTemplateColumns: "2fr 50px 65px 42px",
                 alignItems: "center", padding: "9px 0",
                 borderBottom: i < allFeatures.length - 1 ? `1px solid rgba(0,0,0,0.04)` : "none",
               }}>
-                <span style={{ fontSize: "12px", color: C.textSec, fontFamily: "monospace" }}>{f.name}</span>
+                <span style={{ fontSize: "11px", color: C.textSec, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
                 <span style={{ fontSize: "12px", color: C.text, fontWeight: 500 }}>{f.value}</span>
-                <span style={{ fontSize: "12px", color: f.directionColor, fontWeight: 500 }}>{f.direction}</span>
-                <span style={{ fontSize: "11px", color: C.textFaint }}>{f.source}</span>
+                <span style={{ fontSize: "11px", color: f.directionColor, fontWeight: 500 }}>{f.direction}</span>
+                <span style={{ fontSize: "10px", color: C.textFaint }}>{f.source}</span>
               </div>
             ))}
             <button style={{
@@ -1615,8 +2458,12 @@ export default function App() {
   const [customLabel, setCustomLabel] = useState("");
   const [parsedResult, setParsedResult] = useState<ParsedResult | null>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedSource[]>([]);
+  const [csvSignals, setCsvSignals] = useState<UploadedFileSignal[]>([]);
+  const [combinedReadout, setCombinedReadout] = useState<CombinedReadout | null>(null);
 
-  const handleSetDomain = (d: DomainId) => { setDomain(d); setParsedResult(null); setUploadedFiles([]); };
+  const activeIntel = getActiveIntelligence(domain, parsedResult, csvSignals, combinedReadout);
+
+  const handleSetDomain = (d: DomainId) => { setDomain(d); setParsedResult(null); setUploadedFiles([]); setCsvSignals([]); setCombinedReadout(null); };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "Inter, -apple-system, sans-serif" }}>
@@ -1657,18 +2504,30 @@ export default function App() {
           <SignalIntake
             domain={domain}
             setDomain={handleSetDomain}
-            onGenerate={(url, note) => { setParsedResult(parseMarketInput(domain, url, note)); setTab("intelligence"); }}
+            onGenerate={(url, note) => {
+              const pr = parseMarketInput(domain, url, note);
+              const cs = extractSignalsFromUploadedFiles(uploadedFiles, domain);
+              setParsedResult(pr);
+              setCsvSignals(cs);
+              setCombinedReadout(buildCombinedReadout(domain, pr, cs, uploadedFiles));
+              setTab("intelligence");
+            }}
             onAddDomain={() => setModal(true)}
             customLabel={customLabel}
             parsedResult={parsedResult}
             uploadedFiles={uploadedFiles}
-            onFilesUploaded={(files, _txtContent) => setUploadedFiles((prev) => [...prev, ...files])}
+            onFilesUploaded={(files, _txtContent) => {
+              const next = [...uploadedFiles, ...files];
+              setUploadedFiles(next);
+              setCsvSignals(extractSignalsFromUploadedFiles(next, domain));
+            }}
+            csvSignals={csvSignals}
           />
         )}
         {tab === "intelligence" && (
-          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} parsedResult={parsedResult} />
+          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} />
         )}
-        {tab === "forecast" && <ForecastDecisionPack domain={domain} parsedResult={parsedResult} />}
+        {tab === "forecast" && <ForecastDecisionPack domain={domain} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} />}
       </main>
 
       {modal && <AddDomainModal onClose={() => setModal(false)} onAdd={(name) => { setCustomLabel(name); handleSetDomain("custom"); }} />}
