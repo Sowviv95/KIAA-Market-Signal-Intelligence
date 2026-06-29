@@ -124,6 +124,23 @@ Create a custom domain via "+ Add new domain", then paste:
 Supply delay and demand increase are creating short-term price rise risk. Inventory change remains the main uncertainty.
 ```
 
+## Backend intelligence service (Sprint 5D)
+
+An optional FastAPI backend uses an LLM to produce structured market intelligence from the same inputs the frontend uses (URL text, notes, file summaries, CSV signals). The backend does not fetch URLs or scrape websites.
+
+Quick start:
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+pip install -r requirements.txt
+cp .env.example .env            # then add OPENAI_API_KEY
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+See `backend/README.md` for full setup, endpoints, and test payloads.
+
 ## Tech stack
 
 - React 18 + TypeScript
@@ -131,3 +148,5 @@ Supply delay and demand increase are creating short-term price rise risk. Invent
 - Recharts 2
 - Tailwind CSS 4 + shadcn/ui (from Figma Make export)
 - pnpm
+- FastAPI + Pydantic (backend)
+- OpenAI Python SDK (backend LLM provider)
