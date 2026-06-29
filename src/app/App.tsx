@@ -1285,15 +1285,18 @@ function computeSignalScore(csvSignals: UploadedFileSignal[]): number {
 function adjustChartData(
   baseData: ChartRow[],
   csvSignals: UploadedFileSignal[],
+  overrideSignalPct?: number,
+  overrideBandPct?: number,
 ): { chartData: ChartRow[]; adjusted: boolean } {
-  if (csvSignals.length === 0) return { chartData: baseData, adjusted: false };
+  if (csvSignals.length === 0 && overrideSignalPct === undefined) return { chartData: baseData, adjusted: false };
 
-  const score = computeSignalScore(csvSignals);
-  // Per forecast step: shift = score * 0.35, cumulative. Mild effect.
-  const shiftPerStep = score * 0.35;
-  // Band adjustment: bearish signals widen uncertainty slightly
+  // Use override from LLM chart guidance if available; otherwise compute from signals
+  const score = overrideSignalPct !== undefined ? overrideSignalPct : computeSignalScore(csvSignals);
+  // shiftPerStep: spread the total signal_change_pct across 8 forecast steps → per-step increment
+  const shiftPerStep = overrideSignalPct !== undefined ? score / 8 : score * 0.35;
+  // Band: use override band pct spread across steps, or compute from bearish signal count
   const bearishCount = csvSignals.filter((s) => s.direction === "Bearish" || s.direction === "Mixed").length;
-  const bandExtra = bearishCount * 0.8;
+  const bandExtra = overrideBandPct !== undefined ? overrideBandPct / 10 : bearishCount * 0.8;
 
   let forecastIdx = 0;
   const adjusted = baseData.map((row) => {
@@ -1539,6 +1542,49 @@ function activeRisks_remaining(signals: Signal[]): string[] {
 
 // ── LLM response → ActiveIntelligence mapper ─────────────────────────────
 
+// ── Chart guidance normalization ──────────────────────────────────────────
+
+function normalizeChartGuidance(cg: LLMChartGuidance, outlook: string): { signalPct: number; bandPct: number } {
+  const ol = outlook.toLowerCase();
+  let minSig: number, maxSig: number, minBand: number, maxBand: number;
+  if (ol.includes("bullish") && !ol.includes("mildly")) {
+    minSig = 3.5; maxSig = 5.5; minBand = 6; maxBand = 10;
+  } else if (ol.includes("mildly") || (ol.includes("bullish") && ol.includes("mild"))) {
+    minSig = 2.5; maxSig = 5.0; minBand = 6; maxBand = 10;
+  } else if (ol.includes("bearish")) {
+    minSig = -5.5; maxSig = -2.5; minBand = 6; maxBand = 10;
+  } else if (ol.includes("mixed") && ol.includes("upward")) {
+    minSig = 1.0; maxSig = 3.0; minBand = 7; maxBand = 11;
+  } else {
+    minSig = -1.0; maxSig = 1.5; minBand = 6; maxBand = 10;
+  }
+  const rawSig = cg.signal_change_pct;
+  const signalPct = (rawSig >= minSig && rawSig <= maxSig) ? rawSig : +((minSig + maxSig) / 2).toFixed(1);
+  const rawBand = cg.uncertainty_band_pct;
+  const bandPct = (rawBand >= minBand && rawBand <= maxBand) ? rawBand : +((minBand + maxBand) / 2).toFixed(1);
+  return { signalPct, bandPct };
+}
+
+function shortenEventLabel(label: string): string {
+  if (label.length <= 22) return label;
+  const abbrevs: [RegExp, string][] = [
+    [/world container index/i, "WCI"],
+    [/container.*index/i, "Container index"],
+    [/increasing demand.*shipping/i, "Route demand"],
+    [/bunker fuel.*drop/i, "Fuel offset"],
+    [/bunker fuel.*eas/i, "Fuel offset"],
+    [/port congestion/i, "Port congestion"],
+    [/freight rate/i, "Rate signal"],
+    [/supply chain/i, "Supply chain"],
+    [/vessel.*availab/i, "Vessel supply"],
+    [/benchmark.*track/i, "Benchmark tracked"],
+  ];
+  for (const [re, short] of abbrevs) {
+    if (re.test(label)) return short;
+  }
+  return label.slice(0, 20) + "\u2026";
+}
+
 function mapLLMToActiveIntelligence(llm: LLMResponse, domain: DomainId): ActiveIntelligence {
   const baseDc = DOMAIN_CHARTS[domain];
   const dirColor = (dir: string) =>
@@ -1563,12 +1609,15 @@ function mapLLMToActiveIntelligence(llm: LLMResponse, domain: DomainId): ActiveI
     : "Mixed"
   );
 
+  // Normalize chart guidance values
+  const { signalPct, bandPct } = normalizeChartGuidance(llm.chart_guidance, llm.outlook);
+
   const chartBase = baseDc.chartData;
   const actualPoints = chartBase.filter((r) => r.actual !== undefined);
   const chartEvents = llm.chart_guidance.event_markers.slice(0, 3).map((label, i) => {
     const idx = Math.min(Math.floor(actualPoints.length * (0.4 + i * 0.25)), actualPoints.length - 1);
     const pt = actualPoints[idx] || actualPoints[actualPoints.length - 1];
-    return { period: pt.period, value: pt.actual || 100, label };
+    return { period: pt.period, value: pt.actual || 100, label: shortenEventLabel(label) };
   });
 
   const volColor = llm.volatility_risk.toLowerCase().includes("high") ? C.red
@@ -1582,12 +1631,13 @@ function mapLLMToActiveIntelligence(llm: LLMResponse, domain: DomainId): ActiveI
   ];
 
   const topDriver = llm.chart_guidance.top_driver || (drivers[0]?.name ?? "Source signals");
+  const signalColor = signalPct >= 0 ? C.green : C.red;
   const chartMetrics = [
     { label: "Forecast bias", value: llm.chart_guidance.bias || llm.outlook, color: outlookColor },
-    { label: "30-day signal change", value: `+${llm.chart_guidance.signal_change_pct.toFixed(1)}%`, color: C.green },
+    { label: "30-day signal change", value: `${signalPct >= 0 ? "+" : ""}${signalPct.toFixed(1)}%`, color: signalColor },
     { label: "Confidence", value: `${llm.confidence}%`, color: C.text },
-    { label: "Uncertainty band", value: `\u00B1${llm.chart_guidance.uncertainty_band_pct.toFixed(1)}%`, color: llm.chart_guidance.uncertainty_band_pct > 7 ? C.amber : C.text },
-    { label: "Top driver", value: topDriver.length > 28 ? topDriver.slice(0, 26) + "\u2026" : topDriver, color: C.text },
+    { label: "Uncertainty band", value: `\u00B1${bandPct.toFixed(1)}%`, color: bandPct > 8 ? C.amber : C.text },
+    { label: "Top driver", value: topDriver, color: C.text },
     { label: "Model mode", value: "LLM-structured", color: C.textMuted },
   ];
 
@@ -1721,7 +1771,7 @@ function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name:
 
 function SignalIntake({
   domain, setDomain, onGenerate, onAddDomain, customLabel, parsedResult,
-  uploadedFiles, onFilesUploaded, csvSignals, generateStatus, generateError, generatedSources,
+  uploadedFiles, onFilesUploaded, csvSignals, generateStatus, generateError, generatedSources, sourcesDirty,
 }: {
   domain: DomainId;
   setDomain: (d: DomainId) => void;
@@ -1735,6 +1785,7 @@ function SignalIntake({
   generateStatus: GenerateStatus;
   generateError: string | null;
   generatedSources: { name: string; type: string; status: string; quality: string }[];
+  sourcesDirty: boolean;
 }) {
   const [dropOpen, setDropOpen] = useState(false);
   const [url, setUrl] = useState("");
@@ -2011,19 +2062,23 @@ function SignalIntake({
 
             return hasAnySrc ? (
               <>
-                <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: "14px" }}>
+                <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: sourcesDirty ? "8px" : "14px" }}>
                   {[
                     { text: `${sourceCount} source${sourceCount !== 1 ? "s" : ""} parsed`, green: true },
-                    ...(generateStatus === "done" ? [{ text: "Ready", green: true }] : []),
+                    ...(generateStatus === "done" && !sourcesDirty ? [{ text: "Ready", green: true }] : []),
+                    ...(sourcesDirty ? [{ text: "Changed", green: false }] : []),
                   ].map((chip) => (
                     <span key={chip.text} style={{
                       padding: "4px 10px", borderRadius: "20px", fontSize: "11px", fontWeight: chip.green ? 500 : 400,
-                      background: chip.green ? C.greenSubtle : "#f3f4f6",
-                      border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
-                      color: chip.green ? C.green : C.textSec,
+                      background: chip.green ? C.greenSubtle : chip.text === "Changed" ? "rgba(217,119,6,0.10)" : "#f3f4f6",
+                      border: `1px solid ${chip.green ? C.greenBorder : chip.text === "Changed" ? "rgba(217,119,6,0.25)" : C.border}`,
+                      color: chip.green ? C.green : chip.text === "Changed" ? C.amber : C.textSec,
                     }}>{chip.text}</span>
                   ))}
                 </div>
+                {sourcesDirty && (
+                  <p style={{ fontSize: "11px", color: C.amber, margin: "0 0 10px" }}>Sources changed — regenerate to refresh intelligence</p>
+                )}
                 <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "8px" }}>
                   {currentSources.map((src, i) => (
                     <div key={i} style={{
@@ -2125,7 +2180,7 @@ function SignalIntake({
 
 // ── Screen 2: Signal Intelligence ──────────────────────────────────────────
 
-function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, combinedReadout, activeIntel, generateStatus, generateError, llmResponse }: { domain: DomainId; onGenerate: () => void; parsedResult: ParsedResult | null; csvSignals: UploadedFileSignal[]; combinedReadout: CombinedReadout | null; activeIntel: ActiveIntelligence; generateStatus: GenerateStatus; generateError: string | null; llmResponse: LLMResponse | null }) {
+function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, combinedReadout, activeIntel, generateStatus, generateError, llmResponse, sourcesDirty }: { domain: DomainId; onGenerate: () => void; parsedResult: ParsedResult | null; csvSignals: UploadedFileSignal[]; combinedReadout: CombinedReadout | null; activeIntel: ActiveIntelligence; generateStatus: GenerateStatus; generateError: string | null; llmResponse: LLMResponse | null; sourcesDirty: boolean }) {
   const baseDc = DOMAIN_CHARTS[domain];
   const hasSource = activeIntel.hasSourceInput;
   // Chart: adjust from all source signals (note + CSV)
@@ -2138,7 +2193,12 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
     })) : []),
     ...csvSignals,
   ];
-  const { chartData: adjustedChartData, adjusted: chartIsAdjusted } = adjustChartData(baseDc.chartData, allSignalScores);
+  // Use normalized LLM chart guidance for chart slope/band if available
+  const llmNorm = llmResponse ? normalizeChartGuidance(llmResponse.chart_guidance, llmResponse.outlook) : null;
+  const { chartData: adjustedChartData, adjusted: chartIsAdjusted } = adjustChartData(
+    baseDc.chartData, allSignalScores,
+    llmNorm?.signalPct, llmNorm?.bandPct,
+  );
   const chartEvents = hasSource ? activeIntel.chartEvents : baseDc.events;
   const summaryMetrics = hasSource ? activeIntel.summaryMetrics : baseDc.summaryMetrics;
   const chartMetrics = hasSource ? activeIntel.chartMetrics : baseDc.metrics;
@@ -2159,6 +2219,14 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
         <div style={{ marginBottom: "14px", padding: "10px 16px", background: "rgba(22,163,74,0.06)", border: `1px solid rgba(22,163,74,0.18)`, borderRadius: "8px", display: "flex", alignItems: "center", gap: "8px" }}>
           <span style={{ fontSize: "11px", color: C.green, fontWeight: 600 }}>LLM intelligence</span>
           <span style={{ fontSize: "11px", color: C.textMuted }}>Source: {llmResponse.source_type} | Domain: {llmResponse.detected_domain}</span>
+        </div>
+      )}
+
+      {/* Sources changed banner */}
+      {sourcesDirty && (
+        <div style={{ marginBottom: "14px", padding: "10px 16px", background: "rgba(217,119,6,0.06)", border: `1px solid rgba(217,119,6,0.18)`, borderRadius: "8px", display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "11px", color: C.amber, fontWeight: 600 }}>Sources changed</span>
+          <span style={{ fontSize: "11px", color: C.textMuted }}>New files uploaded — regenerate to refresh intelligence</span>
         </div>
       )}
 
@@ -2520,7 +2588,12 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
               borderBottom: i < chartMetrics.length - 1 ? `1px solid ${C.borderSub}` : "none",
             }}>
               <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 3px" }}>{m.label}</p>
-              <p style={{ fontSize: "14px", fontWeight: 600, color: m.color, margin: 0 }}>{m.value}</p>
+              <p style={{
+                fontSize: m.label === "Top driver" ? "12px" : "14px",
+                fontWeight: 600, color: m.color, margin: 0,
+                lineHeight: m.label === "Top driver" ? 1.4 : undefined,
+                wordBreak: m.label === "Top driver" ? "break-word" as const : undefined,
+              }}>{m.value}</p>
             </div>
           ))}
           <div style={{
@@ -2693,6 +2766,9 @@ export default function App() {
   const deterministicIntel = getActiveIntelligence(domain, parsedResult, csvSignals, combinedReadout);
   const activeIntel = llmIntel || deterministicIntel;
 
+  // Sources changed since last generate if snapshot was cleared but a generate already completed
+  const sourcesDirty = (generateStatus === "done" || generateStatus === "error") && generatedSources.length === 0 && uploadedFiles.length > 0;
+
   const handleSetDomain = (d: DomainId) => {
     setDomain(d); setParsedResult(null); setUploadedFiles([]); setCsvSignals([]);
     setCombinedReadout(null); setLlmIntel(null); setLlmResponse(null);
@@ -2811,15 +2887,17 @@ export default function App() {
               const next = [...uploadedFiles, ...files];
               setUploadedFiles(next);
               setCsvSignals(extractSignalsFromUploadedFiles(next, domain));
+              setGeneratedSources([]); // clear snapshot so preview rebuilds from live inputs
             }}
             csvSignals={csvSignals}
             generateStatus={generateStatus}
             generateError={generateError}
             generatedSources={generatedSources}
+            sourcesDirty={sourcesDirty}
           />
         )}
         {tab === "intelligence" && (
-          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} generateStatus={generateStatus} generateError={generateError} llmResponse={llmResponse} />
+          <SignalIntelligence domain={domain} onGenerate={() => setTab("forecast")} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} generateStatus={generateStatus} generateError={generateError} llmResponse={llmResponse} sourcesDirty={sourcesDirty} />
         )}
         {tab === "forecast" && <ForecastDecisionPack domain={domain} parsedResult={parsedResult} csvSignals={csvSignals} combinedReadout={combinedReadout} activeIntel={activeIntel} />}
       </main>
