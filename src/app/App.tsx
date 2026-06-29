@@ -214,6 +214,12 @@ function buildSourcePreview(
   uploadedFiles: UploadedSource[],
 ): PreviewSource[] {
   const rows: PreviewSource[] = [];
+
+  // Separate manual uploads from configured sync files
+  const parsedFiles = uploadedFiles.filter((f) => f.status === "parsed");
+  const manualFiles = parsedFiles.filter((f) => f.sourceCategory !== "Configured sync");
+  const syncFiles = parsedFiles.filter((f) => f.sourceCategory === "Configured sync");
+
   if (url) {
     const ul = url.toLowerCase();
     const label = ul.includes("drewry") || ul.includes("container-index") ? "Drewry World Container Index URL"
@@ -224,20 +230,23 @@ function buildSourcePreview(
       : "Market source URL";
     rows.push({ name: label, type: "URL source", status: "Parsed", quality: "High" });
   }
-  if (note) {
+
+  // Only show "Pasted market note" if note exists AND was not auto-populated from an uploaded TXT file
+  const hasTxtUpload = manualFiles.some((f) => f.extension === "txt");
+  if (note && !hasTxtUpload) {
     rows.push({ name: "Pasted market note", type: "Unstructured note", status: "Parsed", quality: note.length > 50 ? "High" : "Medium" });
   }
-  // Separate manual uploads from configured sync files
-  const manualFiles = uploadedFiles.filter((f) => f.status === "parsed" && f.sourceCategory !== "Configured sync");
-  const syncFiles = uploadedFiles.filter((f) => f.status === "parsed" && f.sourceCategory === "Configured sync");
 
+  // Show each manual uploaded file individually
   for (const uf of manualFiles) {
-    const typeLabel = uf.extension === "csv" ? "Structured data" : uf.extension === "json" ? "Source metadata" : "Text source";
-    rows.push({ name: uf.name, type: uf.sourceCategory || typeLabel, status: "Parsed", quality: uf.extension === "csv" ? "High" : "Medium" });
+    const typeLabel = uf.extension === "csv" ? "CSV source"
+      : uf.extension === "json" ? "JSON source"
+      : "Text source";
+    rows.push({ name: uf.name, type: typeLabel, status: "Parsed", quality: uf.extension === "csv" ? "High" : "Medium" });
   }
 
+  // Show configured sync as one aggregated row
   if (syncFiles.length > 0) {
-    // Detect dominant domain from synced files for label
     const domains = syncFiles.map((f) => f.detectedDomain).filter(Boolean);
     const domLabel = domains.length > 0 ? domains[0] : "market";
     rows.push({
@@ -250,6 +259,34 @@ function buildSourcePreview(
   }
 
   return rows;
+}
+
+// ── Domain mismatch detection ──────────────────────────────────────────────
+
+const DOMAIN_HINT_KEYWORDS: Record<string, string[]> = {
+  freight: ["freight", "shipping", "container", "drewry", "world container index", "bunker", "port", "vessel", "route", "congestion", "bdi", "baltic"],
+  mining: ["mining", "copper", "iron ore", "coal", "nickel", "lithium", "mine", "ore", "smelter", "concentrate", "metal"],
+  agriculture: ["agriculture", "wheat", "corn", "soybean", "crop", "yield", "weather", "rainfall", "drought", "harvest", "fertilizer"],
+};
+
+function detectSourceDomainHint(url: string, note: string, uploadedFiles: UploadedSource[]): DomainId | null {
+  const text = [
+    url,
+    note.slice(0, 500),
+    ...uploadedFiles.filter((f) => f.status === "parsed").map((f) => f.name + " " + (f.preview || "").slice(0, 200)),
+  ].join(" ").toLowerCase();
+
+  const scores: Record<string, number> = { freight: 0, mining: 0, agriculture: 0 };
+  for (const [dom, kws] of Object.entries(DOMAIN_HINT_KEYWORDS)) {
+    for (const kw of kws) {
+      if (text.includes(kw)) scores[dom]++;
+    }
+  }
+
+  const sorted = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  if (sorted[0][1] === 0) return null;
+  if (sorted[0][1] === sorted[1][1]) return null; // tie — ambiguous
+  return sorted[0][0] as DomainId;
 }
 
 // ── Domain data ────────────────────────────────────────────────────────────
@@ -953,9 +990,11 @@ function parseCsvSimple(text: string): { headers: string[]; rows: string[][]; ro
   return { headers, rows, rowCount: rows.length };
 }
 
+let _fileIdCounter = 0;
+
 async function parseUploadedFile(file: File): Promise<UploadedSource> {
   const ext = getFileExtension(file.name);
-  const id = `${file.name}-${Date.now()}`;
+  const id = `upload-${file.name}-${Date.now()}-${++_fileIdCounter}`;
 
   if (ext === "unsupported") {
     return {
@@ -1892,13 +1931,15 @@ function SignalIntake({
 
   const handleFiles = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
+    // Copy files out of the live FileList before any async work or input reset
+    const files = Array.from(fileList);
     const results: UploadedSource[] = [];
     let txtContent: string | null = null;
-    for (let i = 0; i < fileList.length; i++) {
-      const parsed = await parseUploadedFile(fileList[i]);
+    for (const file of files) {
+      const parsed = await parseUploadedFile(file);
       results.push(parsed);
       if (parsed.extension === "txt" && parsed.status === "parsed") {
-        const content = await fileList[i].text();
+        const content = await file.text();
         txtContent = txtContent ? txtContent + "\n\n" + content : content;
       }
     }
@@ -1908,6 +1949,8 @@ function SignalIntake({
     }
   };
   const domainLabel = domain === "custom" && customLabel ? customLabel : d.label;
+  const domainHint = detectSourceDomainHint(url, note, uploadedFiles);
+  const hasMismatch = domainHint !== null && domainHint !== domain;
 
   return (
     <div>
@@ -2168,8 +2211,9 @@ function SignalIntake({
             const currentSources: PreviewSource[] =
               generatedSources.length > 0 ? generatedSources : buildSourcePreview(url, note, uploadedFiles);
 
-            // Real source count includes actual files, not aggregated preview rows
-            const realCount = (url ? 1 : 0) + (note ? 1 : 0) + uploadedFiles.filter((f) => f.status === "parsed").length;
+            // Real source count: URL + note (only if not from TXT upload) + all parsed files
+            const hasTxtFile = uploadedFiles.some((f) => f.status === "parsed" && f.extension === "txt" && f.sourceCategory !== "Configured sync");
+            const realCount = (url ? 1 : 0) + (note && !hasTxtFile ? 1 : 0) + uploadedFiles.filter((f) => f.status === "parsed").length;
             const hasAnySrc = currentSources.length > 0;
 
             return hasAnySrc ? (
@@ -2191,21 +2235,22 @@ function SignalIntake({
                 {sourcesDirty && (
                   <p style={{ fontSize: "11px", color: C.amber, margin: "0 0 10px" }}>Sources changed — regenerate to refresh intelligence</p>
                 )}
-                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "5px", overflowX: "hidden" }}>
                   {currentSources.map((src, i) => (
                     <div key={i} style={{
-                      padding: "11px 13px", background: "#fafafa",
-                      border: `1px solid ${C.borderSub}`, borderRadius: "8px",
+                      padding: "8px 11px", background: "#fafafa",
+                      border: `1px solid ${C.borderSub}`, borderRadius: "7px",
                       display: "flex", alignItems: "center", justifyContent: "space-between",
+                      gap: "8px", minWidth: 0,
                     }}>
-                      <div>
-                        <p style={{ fontSize: "13px", fontWeight: 500, color: C.text, margin: 0 }}>{src.name}</p>
-                        <p style={{ fontSize: "11px", color: C.textFaint, margin: "2px 0 0" }}>{src.type}</p>
-                        {src.subtitle && <p style={{ fontSize: "10px", color: C.textMuted, margin: "2px 0 0" }}>{src.subtitle}</p>}
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <p style={{ fontSize: "12px", fontWeight: 500, color: C.text, margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{src.name}</p>
+                        <p style={{ fontSize: "10px", color: C.textFaint, margin: "1px 0 0" }}>{src.type}</p>
+                        {src.subtitle && <p style={{ fontSize: "10px", color: C.textMuted, margin: "1px 0 0" }}>{src.subtitle}</p>}
                       </div>
-                      <div style={{ display: "flex", gap: "6px" }}>
-                        <span style={{ padding: "3px 8px", background: "#f3f4f6", borderRadius: "4px", fontSize: "11px", color: C.textSec }}>{src.status}</span>
-                        <span style={{ padding: "3px 8px", borderRadius: "4px", fontSize: "11px",
+                      <div style={{ display: "flex", gap: "4px", flexShrink: 0 }}>
+                        <span style={{ padding: "2px 6px", background: "#f3f4f6", borderRadius: "4px", fontSize: "10px", color: C.textSec }}>{src.status}</span>
+                        <span style={{ padding: "2px 6px", borderRadius: "4px", fontSize: "10px",
                           background: src.quality === "High" ? "rgba(22,163,74,0.10)" : "#f3f4f6",
                           color: src.quality === "High" ? C.green : C.textMuted,
                           fontWeight: src.quality === "High" ? 500 : 400,
@@ -2247,6 +2292,20 @@ function SignalIntake({
             );
           })()}
 
+          {/* Domain mismatch warning */}
+          {hasMismatch && (() => {
+            const hintLabel = DOMAINS[domainHint!]?.label || domainHint!;
+            const selLabel = DOMAINS[domain]?.label || domain;
+            return (
+              <div style={{ marginTop: "14px", padding: "10px 14px", background: "rgba(217,119,6,0.06)", border: `1px solid rgba(217,119,6,0.20)`, borderRadius: "8px" }}>
+                <p style={{ fontSize: "11px", color: C.amber, fontWeight: 500, margin: "0 0 3px" }}>Source / domain mismatch</p>
+                <p style={{ fontSize: "11px", color: C.textSec, margin: 0, lineHeight: 1.5 }}>
+                  Sources look <strong>{hintLabel.toLowerCase()}</strong>-related, but the selected domain is <strong>{selLabel}</strong>. Switch the selected domain or remove mismatched sources to generate intelligence.
+                </p>
+              </div>
+            );
+          })()}
+
           {generateStatus === "analysing" && (
             <div style={{ marginTop: "14px", padding: "12px 14px", background: "rgba(22,163,74,0.06)", border: `1px solid rgba(22,163,74,0.18)`, borderRadius: "8px", display: "flex", alignItems: "center", gap: "10px" }}>
               <span style={{ fontSize: "14px", animation: "spin 1s linear infinite", display: "inline-block" }}>&#9696;</span>
@@ -2276,13 +2335,14 @@ function SignalIntake({
 
           <button
             onClick={() => onGenerate(url, note)}
-            disabled={generateStatus === "analysing"}
+            disabled={generateStatus === "analysing" || hasMismatch}
             style={{
               marginTop: "18px", width: "100%", padding: "12px",
-              background: generateStatus === "analysing" ? C.textFaint : C.green, color: "#fff", border: "none",
+              background: hasMismatch ? C.textFaint : generateStatus === "analysing" ? C.textFaint : C.green,
+              color: "#fff", border: "none",
               borderRadius: "8px", fontSize: "14px", fontWeight: 600,
-              cursor: generateStatus === "analysing" ? "not-allowed" : "pointer",
-              opacity: generateStatus === "analysing" ? 0.7 : 1,
+              cursor: (generateStatus === "analysing" || hasMismatch) ? "not-allowed" : "pointer",
+              opacity: (generateStatus === "analysing" || hasMismatch) ? 0.7 : 1,
             }}
           >{generateStatus === "analysing" ? "Analysing..." : "Generate market signals"}</button>
         </div>
@@ -2884,7 +2944,12 @@ export default function App() {
   const sourcesDirty = (generateStatus === "done" || generateStatus === "error") && generatedSources.length === 0 && uploadedFiles.length > 0;
 
   const handleSetDomain = (d: DomainId) => {
-    setDomain(d); setParsedResult(null); setUploadedFiles([]); setCsvSignals([]);
+    // Preserve manual uploads across domain switch; clear only configured sync files
+    const manualOnly = uploadedFiles.filter((f) => f.sourceCategory !== "Configured sync");
+    setDomain(d);
+    setParsedResult(null);
+    setUploadedFiles(manualOnly);
+    setCsvSignals(extractSignalsFromUploadedFiles(manualOnly, d));
     setCombinedReadout(null); setLlmIntel(null); setLlmResponse(null);
     setGenerateStatus("idle"); setGenerateError(null); setGeneratedSources([]);
     setSyncStatus("idle");
@@ -2908,6 +2973,10 @@ export default function App() {
   };
 
   const handleGenerate = async (url: string, note: string) => {
+    // Guard: do not generate if source/domain mismatch exists
+    const hint = detectSourceDomainHint(url, note, uploadedFiles);
+    if (hint && hint !== domain) return;
+
     // Snapshot the sources used in this run so preview persists across tab navigation
     setGeneratedSources(buildSourcePreview(url, note, uploadedFiles));
 
