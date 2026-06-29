@@ -1,6 +1,6 @@
 # KIAA Market Signal Intelligence — Demo Script
 
-Estimated time: 5 minutes.
+Estimated time: 6–7 minutes.
 
 ## Before the demo
 
@@ -60,13 +60,19 @@ https://www.drewry.co.uk/supply-chain-advisors/supply-chain-expertise/world-cont
 
 6. Walk through the output:
 
-> "The intelligence service detected a freight / container benchmark source. The outlook is mildly bullish with medium-high confidence. You can see the generated signals — container freight benchmark, rate pressure, supply chain signal. The chart shows a signal-adjusted forecast path. On the right, the forecast metrics show the bias, confidence, uncertainty band, and top driver."
+> "The intelligence service detected a freight / container benchmark source. The outlook is mildly bullish with medium-high confidence. You can see the generated signals, the forecast reasoning, and the top drivers."
+
+> "The Analyst Forecast chart shows three things: the dark line is historical actuals, the grey dashed line is the baseline forecast — what the market would look like without new signals — and the green line is the signal-adjusted forecast. The shaded band is the confidence range, widening into the forecast horizon. The timeline uses relative labels: T-minus weeks for history, Now for the forecast transition, and T-plus weeks for the forecast horizon."
+
+> "Below the chart, the diagnostics strip shows the forecast shift vs baseline, signal strength, volatility, confidence, horizon, and top driver. On the right, the movement panel explains which drivers caused the forecast to shift and by how much."
 
 Point out:
 - Top metric cards (Forecast pressure, Confidence, Volatility risk, Horizon)
 - Generated market signals table
 - Combined market readout card
-- Signal-adjusted forecast chart
+- Analyst Forecast chart with baseline vs signal-adjusted lines
+- Phase bands (historical, signal window, forecast horizon)
+- Diagnostics strip and endpoint summary
 - Model mode label: "LLM-structured intelligence"
 
 ### Step 3 — Return and add files (60 seconds)
@@ -97,26 +103,41 @@ Point out:
 
 3. On Signal Intelligence, walk through:
 
-> "The combined outlook is mildly bullish over 2 to 4 weeks. Upward drivers are port congestion and route-rate pressure. Bunker fuel easing is a partial offset. The chart path adjusts from the combined signal score. Confidence is medium-high."
+> "The combined outlook is mildly bullish over 2 to 4 weeks. Upward drivers are port congestion and route-rate pressure. Bunker fuel easing is a partial offset. The green signal-adjusted line now visibly diverges from the grey baseline. The diagnostics strip shows the forecast shifted by a measurable amount. Confidence is medium-high."
 
-### Step 5 — Decision Pack (60 seconds)
+### Step 5 — Decision Pack (90 seconds)
 
 1. Click **Generate forecast decision pack** (or click the Forecast Decision Pack tab).
 
-2. Walk through:
+2. Walk through the sections top to bottom:
 
-> "This is the analyst-ready decision pack. It has the market outlook, risk watchlist, and a training-signal-ready feature table. Each feature has a value, direction, and source. The source evidence section shows exactly what inputs drove this intelligence. This is ready for downstream consumption — a forecast model, a risk dashboard, or an analyst report."
+> "This is the Decision Pack — the analyst-ready recommendation output."
+
+> "At the top, the **Decision Stance** gives a clear recommendation: secure near-term coverage, hedge, hold and monitor, or escalate to review. It shows confidence, urgency, outlook, and the top driver."
+
+> "**What Changed vs Baseline** compares the baseline view against the signal-adjusted view across forecast pressure, volatility, top driver, and recommended stance. The green column shows what changed after signals were applied."
+
+> "The **Recommendation Cards** give domain-specific actions — for freight, it's procurement, hedging, and monitoring implications. Each card has a priority, confidence level, and rationale."
+
+> "**Ranked Driver Impact** shows each driver with its direction, estimated impact, confidence, and a watch action."
+
+> "**Watchlist Triggers** define the conditions that should escalate review — if the forecast shift exceeds a threshold, if confidence drops, if volatility rises, or if the top driver reverses."
+
+> "**What Could Invalidate This View** lists the reversal conditions — what would make this recommendation wrong."
 
 Point out:
-- Decision brief with outlook/confidence chips
-- Market outlook text
-- Risk watchlist
-- Training-signal-ready table with clean feature keys
+- Decision Stance with stance badge
+- What Changed vs Baseline comparison table
+- Domain-aware recommendation cards
+- Ranked driver impact table
+- Watchlist triggers with severity badges
+- Risk reversal conditions
+- Training-signal-ready forecast pack
 - Source evidence
 
 ### Step 6 — Production context (30 seconds)
 
-> "In production, the URL input connects to a scraper or RSS feed. The file upload connects to a watch folder, FTP drop, or data pipeline. The intelligence service runs on each new source arrival and produces structured signals automatically. The demo shows the same flow with local files and URL text interpretation."
+> "In production, the URL input connects to a scraper or RSS feed. The file upload connects to a watch folder, FTP drop, or data pipeline. The intelligence service runs on each new source arrival and produces structured signals automatically. The Decision Pack feeds into downstream systems — risk dashboards, analyst workflows, or procurement tools. The demo shows the same flow with local files and URL text interpretation."
 
 ---
 
@@ -134,10 +155,16 @@ The demo still works — signals are generated from keyword matching, but the ou
 
 ---
 
+## Key narrative
+
+> "KIAA ingests market signals, validates the source/domain context, compares a baseline forecast against a signal-adjusted forecast, shows the uncertainty range and source-derived events, and converts the forecast movement into a decision-ready pack with recommendations, watchlist triggers, and reversal conditions."
+
 ## Safe wording reminders
 
 - The app **interprets supplied URL text** — it does not scrape or fetch the page.
 - Uploaded files are **read locally in the browser** — nothing leaves the machine.
 - The API key is **backend-only** — it never appears in frontend code.
-- The chart is a **deterministic projection** adjusted from source signals — it is not a live forecast model.
+- The chart is a **deterministic projection** adjusted from source-derived signals — it is not a live forecast model.
+- The timeline uses **relative labels** (T-7w to T+8w) — no fake calendar dates.
+- Recommendations are **decision support**, not guaranteed outcomes.
 - In production, source inputs connect to **scraper outputs, watch folders, or data pipelines**.

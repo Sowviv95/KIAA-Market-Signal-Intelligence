@@ -1,7 +1,7 @@
-import { useState } from "react";
+import React, { useState } from "react";
 import {
   ComposedChart, Line, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend, ReferenceLine, ReferenceDot, Label,
+  Tooltip, Legend, ReferenceLine, ReferenceDot, ReferenceArea, Label,
   ResponsiveContainer,
 } from "recharts";
 
@@ -533,15 +533,75 @@ const card: React.CSSProperties = {
   padding: "26px",
 };
 
+// ── Timeline generator ────────────────────────────────────────────────────
+// Generates relative weekly labels anchored to the forecast start (transition point).
+// Historical points are labelled T-Nw (weeks before now).
+// The transition point is labelled "Now".
+// Forecast points are labelled T+Nw (weeks into the forecast horizon).
+// This avoids fake calendar labels — the demo shows relative forecast distance.
+
+function generateTimeline(historicalWeeks: number, forecastWeeks: number): string[] {
+  const labels: string[] = [];
+  // Historical: T-7w … T-1w (the last historical point before transition)
+  for (let i = 0; i < historicalWeeks - 1; i++) {
+    const weeksBack = historicalWeeks - 1 - i;
+    labels.push(`T-${weeksBack}w`);
+  }
+  // Transition point (last actual = first forecast anchor)
+  labels.push("Now");
+  // Forecast: T+1w … T+Nw
+  for (let j = 1; j <= forecastWeeks; j++) {
+    labels.push(`T+${j}w`);
+  }
+  return labels;
+}
+
+// Each domain: 7 historical + 1 transition + 8 forecast = 16 rows
+const TIMELINE = generateTimeline(8, 8);
+
+type ChartPhase = "historical" | "signal_window" | "forecast";
+
 // ── Per-domain chart & Screen 2 metrics ──────────────────────────────────
 
-const DOMAIN_CHARTS: Record<DomainId, {
+interface DomainChartConfig {
   summaryMetrics: { label: string; value: string; color: string }[];
-  yDomain: [number, number];
-  chartData: Array<{ period: string; actual?: number; forecast?: number; lower?: number; bandWidth?: number }>;
-  events: { period: string; value: number; label: string }[];
+  chartData: Array<{ period: string; actual?: number; forecast?: number; lower?: number; bandWidth?: number; phase: ChartPhase }>;
+  events: { period: string; value: number; label: string; direction: "up" | "down" | "neutral" }[];
   metrics: { label: string; value: string; color: string }[];
-}> = {
+}
+
+function buildChartData(
+  actuals: number[],
+  forecasts: number[],
+  lowers: number[],
+  bandWidths: number[],
+  signalWindowStart: number, // index into actuals where signal window begins
+): DomainChartConfig["chartData"] {
+  const rows: DomainChartConfig["chartData"] = [];
+  // Historical actuals
+  for (let i = 0; i < actuals.length; i++) {
+    const phase: ChartPhase = i >= signalWindowStart ? "signal_window" : "historical";
+    if (i === actuals.length - 1) {
+      // Transition point — last actual is also first forecast
+      rows.push({ period: TIMELINE[i], actual: actuals[i], forecast: actuals[i], lower: actuals[i], bandWidth: 0, phase });
+    } else {
+      rows.push({ period: TIMELINE[i], actual: actuals[i], phase });
+    }
+  }
+  // Forecast points
+  for (let j = 0; j < forecasts.length; j++) {
+    rows.push({
+      period: TIMELINE[actuals.length + j],
+      forecast: forecasts[j],
+      lower: lowers[j],
+      bandWidth: bandWidths[j],
+      phase: "forecast",
+    });
+  }
+  return rows;
+}
+
+const DOMAIN_CHARTS: Record<DomainId, DomainChartConfig> = {
   mining: {
     summaryMetrics: [
       { label: "Forecast pressure", value: "Bullish", color: C.green },
@@ -549,28 +609,16 @@ const DOMAIN_CHARTS: Record<DomainId, {
       { label: "Volatility risk", value: "Elevated", color: C.amber },
       { label: "Horizon", value: "2\u20134 weeks", color: C.text },
     ],
-    yDomain: [94, 132],
-    chartData: [
-      { period: "W1 Jan", actual: 100.0 },
-      { period: "W2 Jan", actual: 101.2 },
-      { period: "W3 Jan", actual: 99.8 },
-      { period: "W4 Jan", actual: 102.5 },
-      { period: "W1 Feb", actual: 104.1 },
-      { period: "W2 Feb", actual: 103.2 },
-      { period: "W3 Feb", actual: 105.8 },
-      { period: "W4 Feb", actual: 108.4, forecast: 108.4, lower: 108.4, bandWidth: 0 },
-      { period: "W1 Mar", forecast: 110.2, lower: 106.4, bandWidth: 7.6 },
-      { period: "W2 Mar", forecast: 111.8, lower: 107.4, bandWidth: 8.8 },
-      { period: "W3 Mar", forecast: 113.5, lower: 108.2, bandWidth: 10.6 },
-      { period: "W4 Mar", forecast: 114.2, lower: 108.4, bandWidth: 11.6 },
-      { period: "W1 Apr", forecast: 115.8, lower: 109.1, bandWidth: 13.4 },
-      { period: "W2 Apr", forecast: 116.4, lower: 108.8, bandWidth: 15.2 },
-      { period: "W3 Apr", forecast: 117.9, lower: 109.6, bandWidth: 16.6 },
-      { period: "W4 Apr", forecast: 118.5, lower: 109.2, bandWidth: 18.6 },
-    ],
+    chartData: buildChartData(
+      [100.0, 101.2, 99.8, 102.5, 104.1, 103.2, 105.8, 108.4],
+      [110.2, 111.8, 113.5, 114.2, 115.8, 116.4, 117.9, 118.5],
+      [106.4, 107.4, 108.2, 108.4, 109.1, 108.8, 109.6, 109.2],
+      [7.6, 8.8, 10.6, 11.6, 13.4, 15.2, 16.6, 18.6],
+      5, // signal window starts at T-2w (index 5)
+    ),
     events: [
-      { period: "W3 Jan", value: 99.8, label: "Supply disruption parsed" },
-      { period: "W2 Feb", value: 103.2, label: "Inventory signal changed" },
+      { period: TIMELINE[2], value: 99.8, label: "Supply disruption", direction: "up" as const },
+      { period: TIMELINE[5], value: 103.2, label: "Inventory tightness", direction: "up" as const },
     ],
     metrics: [
       { label: "Forecast bias", value: "Bullish", color: C.green },
@@ -588,28 +636,16 @@ const DOMAIN_CHARTS: Record<DomainId, {
       { label: "Volatility risk", value: "High", color: C.red },
       { label: "Horizon", value: "1\u20133 weeks", color: C.text },
     ],
-    yDomain: [90, 134],
-    chartData: [
-      { period: "W1 Jan", actual: 100.0 },
-      { period: "W2 Jan", actual: 98.5 },
-      { period: "W3 Jan", actual: 101.8 },
-      { period: "W4 Jan", actual: 99.2 },
-      { period: "W1 Feb", actual: 103.5 },
-      { period: "W2 Feb", actual: 101.0 },
-      { period: "W3 Feb", actual: 104.2 },
-      { period: "W4 Feb", actual: 106.8, forecast: 106.8, lower: 106.8, bandWidth: 0 },
-      { period: "W1 Mar", forecast: 108.0, lower: 103.5, bandWidth: 9.0 },
-      { period: "W2 Mar", forecast: 109.5, lower: 103.8, bandWidth: 11.4 },
-      { period: "W3 Mar", forecast: 110.8, lower: 103.0, bandWidth: 15.6 },
-      { period: "W4 Mar", forecast: 111.2, lower: 102.5, bandWidth: 17.4 },
-      { period: "W1 Apr", forecast: 112.5, lower: 102.0, bandWidth: 21.0 },
-      { period: "W2 Apr", forecast: 113.0, lower: 101.2, bandWidth: 23.6 },
-      { period: "W3 Apr", forecast: 114.2, lower: 101.0, bandWidth: 26.4 },
-      { period: "W4 Apr", forecast: 114.8, lower: 100.5, bandWidth: 28.6 },
-    ],
+    chartData: buildChartData(
+      [100.0, 98.5, 101.8, 99.2, 103.5, 101.0, 104.2, 106.8],
+      [108.0, 109.5, 110.8, 111.2, 112.5, 113.0, 114.2, 114.8],
+      [103.5, 103.8, 103.0, 102.5, 102.0, 101.2, 101.0, 100.5],
+      [9.0, 11.4, 15.6, 17.4, 21.0, 23.6, 26.4, 28.6],
+      4, // signal window starts at T-3w
+    ),
     events: [
-      { period: "W2 Jan", value: 98.5, label: "Port congestion alert" },
-      { period: "W3 Feb", value: 104.2, label: "Bunker fuel spike" },
+      { period: TIMELINE[1], value: 98.5, label: "Port congestion", direction: "up" as const },
+      { period: TIMELINE[6], value: 104.2, label: "Bunker fuel spike", direction: "down" as const },
     ],
     metrics: [
       { label: "Forecast bias", value: "Firming", color: C.green },
@@ -627,28 +663,16 @@ const DOMAIN_CHARTS: Record<DomainId, {
       { label: "Volatility risk", value: "Moderate", color: C.amber },
       { label: "Horizon", value: "3\u20136 weeks", color: C.text },
     ],
-    yDomain: [92, 128],
-    chartData: [
-      { period: "W1 Jan", actual: 100.0 },
-      { period: "W2 Jan", actual: 100.8 },
-      { period: "W3 Jan", actual: 99.5 },
-      { period: "W4 Jan", actual: 98.2 },
-      { period: "W1 Feb", actual: 99.0 },
-      { period: "W2 Feb", actual: 101.5 },
-      { period: "W3 Feb", actual: 103.0 },
-      { period: "W4 Feb", actual: 104.5, forecast: 104.5, lower: 104.5, bandWidth: 0 },
-      { period: "W1 Mar", forecast: 106.0, lower: 102.8, bandWidth: 6.4 },
-      { period: "W2 Mar", forecast: 107.2, lower: 103.5, bandWidth: 7.4 },
-      { period: "W3 Mar", forecast: 108.0, lower: 103.0, bandWidth: 10.0 },
-      { period: "W4 Mar", forecast: 109.5, lower: 103.2, bandWidth: 12.6 },
-      { period: "W1 Apr", forecast: 110.8, lower: 103.0, bandWidth: 15.6 },
-      { period: "W2 Apr", forecast: 111.5, lower: 102.5, bandWidth: 18.0 },
-      { period: "W3 Apr", forecast: 112.0, lower: 102.0, bandWidth: 20.0 },
-      { period: "W4 Apr", forecast: 112.8, lower: 101.5, bandWidth: 22.6 },
-    ],
+    chartData: buildChartData(
+      [100.0, 100.8, 99.5, 98.2, 99.0, 101.5, 103.0, 104.5],
+      [106.0, 107.2, 108.0, 109.5, 110.8, 111.5, 112.0, 112.8],
+      [102.8, 103.5, 103.0, 103.2, 103.0, 102.5, 102.0, 101.5],
+      [6.4, 7.4, 10.0, 12.6, 15.6, 18.0, 20.0, 22.6],
+      4,
+    ),
     events: [
-      { period: "W3 Jan", value: 99.5, label: "Crop weather alert parsed" },
-      { period: "W2 Feb", value: 101.5, label: "Export inspection signal" },
+      { period: TIMELINE[2], value: 99.5, label: "Crop weather alert", direction: "down" as const },
+      { period: TIMELINE[5], value: 101.5, label: "Export demand signal", direction: "up" as const },
     ],
     metrics: [
       { label: "Forecast bias", value: "Mixed / Bullish", color: C.amber },
@@ -666,25 +690,13 @@ const DOMAIN_CHARTS: Record<DomainId, {
       { label: "Volatility risk", value: "Unknown", color: C.textMuted },
       { label: "Horizon", value: "\u2014", color: C.textMuted },
     ],
-    yDomain: [90, 116],
-    chartData: [
-      { period: "W1 Jan", actual: 100.0 },
-      { period: "W2 Jan", actual: 100.2 },
-      { period: "W3 Jan", actual: 99.8 },
-      { period: "W4 Jan", actual: 100.1 },
-      { period: "W1 Feb", actual: 100.3 },
-      { period: "W2 Feb", actual: 99.9 },
-      { period: "W3 Feb", actual: 100.4 },
-      { period: "W4 Feb", actual: 100.5, forecast: 100.5, lower: 100.5, bandWidth: 0 },
-      { period: "W1 Mar", forecast: 100.8, lower: 98.0, bandWidth: 5.6 },
-      { period: "W2 Mar", forecast: 101.0, lower: 97.5, bandWidth: 7.0 },
-      { period: "W3 Mar", forecast: 101.2, lower: 97.0, bandWidth: 8.4 },
-      { period: "W4 Mar", forecast: 101.5, lower: 96.5, bandWidth: 10.0 },
-      { period: "W1 Apr", forecast: 101.8, lower: 96.0, bandWidth: 11.6 },
-      { period: "W2 Apr", forecast: 102.0, lower: 95.5, bandWidth: 13.0 },
-      { period: "W3 Apr", forecast: 102.2, lower: 95.0, bandWidth: 14.4 },
-      { period: "W4 Apr", forecast: 102.5, lower: 94.5, bandWidth: 16.0 },
-    ],
+    chartData: buildChartData(
+      [100.0, 100.2, 99.8, 100.1, 100.3, 99.9, 100.4, 100.5],
+      [100.8, 101.0, 101.2, 101.5, 101.8, 102.0, 102.2, 102.5],
+      [98.0, 97.5, 97.0, 96.5, 96.0, 95.5, 95.0, 94.5],
+      [5.6, 7.0, 8.4, 10.0, 11.6, 13.0, 14.4, 16.0],
+      6,
+    ),
     events: [],
     metrics: [
       { label: "Forecast bias", value: "Neutral", color: C.textMuted },
@@ -697,24 +709,36 @@ const DOMAIN_CHARTS: Record<DomainId, {
   },
 };
 
-function ForecastChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ dataKey: string; value?: number; color?: string }>; label?: string }) {
+function ForecastChartTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ dataKey: string; value?: number; color?: string; payload?: ChartRow }>; label?: string }) {
   if (!active || !payload?.length) return null;
+  const row = payload[0]?.payload;
+  const phase = row?.phase === "forecast" ? "Forecast" : row?.phase === "signal_window" ? "Signal window" : "Historical";
+  const phaseColor = row?.phase === "forecast" ? C.green : row?.phase === "signal_window" ? C.amber : C.textMuted;
+  const actualVal = payload.find(p => p.dataKey === "actual")?.value;
+  const baselineVal = payload.find(p => p.dataKey === "baseline")?.value;
+  const forecastVal = payload.find(p => p.dataKey === "forecast")?.value;
+  const lowerVal = row?.lower;
+  const upperVal = lowerVal !== undefined && row?.bandWidth !== undefined ? +(lowerVal + row.bandWidth).toFixed(1) : undefined;
+  const delta = baselineVal !== undefined && forecastVal !== undefined && baselineVal !== forecastVal
+    ? +(forecastVal - baselineVal).toFixed(1) : null;
+
   return (
     <div style={{
       background: "#fff", border: `1px solid ${C.border}`, borderRadius: "8px",
       padding: "10px 14px", boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
-      fontSize: "12px", lineHeight: 1.6,
+      fontSize: "12px", lineHeight: 1.7, minWidth: 170,
     }}>
-      <p style={{ margin: "0 0 4px", fontWeight: 600, color: C.text }}>{label}</p>
-      {payload.map((entry, i) => {
-        if (entry.dataKey === "lower" || entry.dataKey === "bandWidth") return null;
-        const name = entry.dataKey === "actual" ? "Actual" : "Forecast median";
-        return (
-          <p key={i} style={{ margin: 0, color: entry.color }}>
-            {name}: {entry.value?.toFixed(1)}
-          </p>
-        );
-      })}
+      <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
+        <p style={{ margin: 0, fontWeight: 600, color: C.text }}>{label}</p>
+        <span style={{ fontSize: "9px", fontWeight: 600, color: phaseColor, textTransform: "uppercase" }}>{phase}</span>
+      </div>
+      {actualVal !== undefined && <p style={{ margin: 0, color: C.text }}>Actual: <strong>{actualVal.toFixed(1)}</strong></p>}
+      {baselineVal !== undefined && row?.phase === "forecast" && <p style={{ margin: 0, color: "#94a3b8" }}>Baseline: <strong>{baselineVal.toFixed(1)}</strong></p>}
+      {forecastVal !== undefined && row?.phase === "forecast" && <p style={{ margin: 0, color: C.green }}>Signal-adjusted: <strong>{forecastVal.toFixed(1)}</strong></p>}
+      {upperVal !== undefined && lowerVal !== undefined && row?.phase === "forecast" && (
+        <p style={{ margin: 0, color: C.textFaint }}>Range: {lowerVal.toFixed(1)} – {upperVal.toFixed(1)}</p>
+      )}
+      {delta !== null && <p style={{ margin: 0, color: delta > 0 ? C.green : C.red, fontWeight: 500 }}>vs baseline: {delta > 0 ? "+" : ""}{delta.toFixed(1)}</p>}
     </div>
   );
 }
@@ -1403,7 +1427,7 @@ function buildCombinedReadout(
 
 // ── Chart adjustment ─────────────────────────────────────────────────────
 
-type ChartRow = { period: string; actual?: number; forecast?: number; lower?: number; bandWidth?: number };
+type ChartRow = { period: string; actual?: number; baseline?: number; forecast?: number; lower?: number; bandWidth?: number; phase: ChartPhase };
 
 function computeSignalScore(csvSignals: UploadedFileSignal[]): number {
   let score = 0;
@@ -1422,7 +1446,13 @@ function adjustChartData(
   overrideSignalPct?: number,
   overrideBandPct?: number,
 ): { chartData: ChartRow[]; adjusted: boolean } {
-  if (csvSignals.length === 0 && overrideSignalPct === undefined) return { chartData: baseData, adjusted: false };
+  // Always populate baseline from original forecast values
+  const withBaseline = baseData.map((row) => ({
+    ...row,
+    baseline: row.forecast,
+  }));
+
+  if (csvSignals.length === 0 && overrideSignalPct === undefined) return { chartData: withBaseline, adjusted: false };
 
   // Use override from LLM chart guidance if available; otherwise compute from signals
   const score = overrideSignalPct !== undefined ? overrideSignalPct : computeSignalScore(csvSignals);
@@ -1433,7 +1463,7 @@ function adjustChartData(
   const bandExtra = overrideBandPct !== undefined ? overrideBandPct / 10 : bearishCount * 0.8;
 
   let forecastIdx = 0;
-  const adjusted = baseData.map((row) => {
+  const adjusted = withBaseline.map((row) => {
     if (row.forecast !== undefined && row.actual === undefined) {
       forecastIdx++;
       const shift = shiftPerStep * forecastIdx;
@@ -1507,7 +1537,7 @@ interface ActiveIntelligence {
   signals: Signal[];
   drivers: { name: string; contribution: number }[];
   reasoning: { headline: string; body: string };
-  chartEvents: { period: string; value: number; label: string }[];
+  chartEvents: { period: string; value: number; label: string; direction?: "up" | "down" | "neutral" }[];
   summaryMetrics: { label: string; value: string; color: string }[];
   chartMetrics: { label: string; value: string; color: string }[];
   risks: string[];
@@ -1593,7 +1623,8 @@ function getActiveIntelligence(
     : actualPoints.slice(-3);
   const activeEvents = eventCandidates.map((sig, i) => {
     const pt = eventPeriods[i] || eventPeriods[eventPeriods.length - 1];
-    return { period: pt.period, value: pt.actual || 100, label: `${sig.name.slice(0, 30)} parsed` };
+    const dir: "up" | "down" | "neutral" = sig.direction === "Bullish" ? "up" : sig.direction === "Bearish" ? "down" : "neutral";
+    return { period: pt.period, value: pt.actual || 100, label: sig.name.slice(0, 24), direction: dir };
   });
 
   // Summary metrics
@@ -1751,7 +1782,8 @@ function mapLLMToActiveIntelligence(llm: LLMResponse, domain: DomainId): ActiveI
   const chartEvents = llm.chart_guidance.event_markers.slice(0, 3).map((label, i) => {
     const idx = Math.min(Math.floor(actualPoints.length * (0.4 + i * 0.25)), actualPoints.length - 1);
     const pt = actualPoints[idx] || actualPoints[actualPoints.length - 1];
-    return { period: pt.period, value: pt.actual || 100, label: shortenEventLabel(label) };
+    const dir: "up" | "down" | "neutral" = llm.outlook.toLowerCase().includes("bullish") ? "up" : llm.outlook.toLowerCase().includes("bearish") ? "down" : "neutral";
+    return { period: pt.period, value: pt.actual || 100, label: shortenEventLabel(label), direction: dir };
   });
 
   const volColor = llm.volatility_risk.toLowerCase().includes("high") ? C.red
@@ -2632,35 +2664,122 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
         </div>
       )}
 
-      {/* Signal-Adjusted Forecast chart */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 240px", gap: "18px", marginTop: "18px" }}>
+      {/* Analyst Forecast chart */}
+      {(() => {
+        // ── Derive forecast start divider from data ──
+        const forecastStartPeriod = adjustedChartData.find(r => r.actual !== undefined && r.forecast !== undefined)?.period || TIMELINE[7];
+
+        // ── Derive signal window start from data ──
+        const signalWindowStart = adjustedChartData.find(r => r.phase === "signal_window")?.period;
+
+        // ── Compute y-axis domain from all plotted values ──
+        const allValues: number[] = [];
+        for (const r of adjustedChartData) {
+          if (r.actual !== undefined) allValues.push(r.actual);
+          if (r.baseline !== undefined) allValues.push(r.baseline);
+          if (r.forecast !== undefined) allValues.push(r.forecast);
+          if (r.lower !== undefined) allValues.push(r.lower);
+          if (r.lower !== undefined && r.bandWidth !== undefined) allValues.push(r.lower + r.bandWidth);
+        }
+        const yMin = Math.floor(Math.min(...allValues) - 3);
+        const yMax = Math.ceil(Math.max(...allValues) + 5);
+
+        // ── Compute endpoint values for callouts ──
+        const forecastRows = adjustedChartData.filter(r => r.phase === "forecast");
+        const lastRow = forecastRows[forecastRows.length - 1];
+        const baselineEnd = lastRow?.baseline;
+        const forecastEnd = lastRow?.forecast;
+        const endpointDelta = baselineEnd !== undefined && forecastEnd !== undefined ? +(forecastEnd - baselineEnd).toFixed(1) : 0;
+        const firstForecastRow = forecastRows[0];
+        const shiftPct = firstForecastRow?.baseline && baselineEnd !== undefined && forecastEnd !== undefined
+          ? +(((forecastEnd - baselineEnd) / firstForecastRow.baseline) * 100).toFixed(1)
+          : 0;
+
+        // ── Top drivers for movement explanation ──
+        const topDriverMetric = chartMetrics.find(m => m.label === "Top driver");
+        const confMetric = chartMetrics.find(m => m.label === "Confidence");
+        const volMetric = summaryMetrics.find(m => m.label === "Volatility risk");
+        const horizonMetric = summaryMetrics.find(m => m.label === "Horizon");
+
+        return (
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 260px", gap: "18px", marginTop: "18px" }}>
         <div style={card}>
-          <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: "0 0 4px" }}>
-            Signal-Adjusted Forecast
-          </h3>
-          <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 18px" }}>
-            Indexed market pressure — historical vs. signal-adjusted projection
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "4px" }}>
+            <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: 0 }}>
+              Analyst Forecast
+            </h3>
+            <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+              {chartIsAdjusted && (
+                <span style={{ fontSize: "10px", fontWeight: 500, color: C.green, padding: "2px 8px", background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, borderRadius: "10px" }}>
+                  Signal-adjusted
+                </span>
+              )}
+            </div>
+          </div>
+          <p style={{ fontSize: "12px", color: C.textMuted, margin: "0 0 6px" }}>
+            {chartIsAdjusted
+              ? "Grey baseline shows market without new signals. Green line shows KIAA signal-adjusted forecast."
+              : "Indexed market pressure — historical actuals vs. baseline projection"}
           </p>
-          <div style={{ width: "100%", height: 320 }}>
+
+          {/* Phase band legend */}
+          <div style={{ display: "flex", gap: "14px", marginBottom: "10px" }}>
+            {[
+              { label: "Historical", color: "#f0f4f8" },
+              { label: "Signal window", color: "rgba(217,119,6,0.06)" },
+              { label: "Forecast horizon", color: "rgba(22,163,74,0.04)" },
+            ].map(p => (
+              <div key={p.label} style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                <div style={{ width: 10, height: 10, borderRadius: 2, background: p.color, border: `1px solid rgba(0,0,0,0.08)` }} />
+                <span style={{ fontSize: "10px", color: C.textFaint }}>{p.label}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ width: "100%", height: 340 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={adjustedChartData} margin={{ top: 20, right: 16, bottom: 4, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.06)" />
+              <ComposedChart data={adjustedChartData} margin={{ top: 20, right: 50, bottom: 4, left: 0 }}>
+                <defs>
+                  <linearGradient id="bandGradient" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stopColor="rgba(22,163,74,0.12)" />
+                    <stop offset="100%" stopColor="rgba(22,163,74,0.04)" />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(0,0,0,0.04)" />
                 <XAxis
                   dataKey="period"
-                  tick={{ fontSize: 11, fill: C.textFaint }}
+                  tick={{ fontSize: 10, fill: C.textFaint }}
                   axisLine={{ stroke: "rgba(0,0,0,0.08)" }}
                   tickLine={false}
                 />
                 <YAxis
-                  domain={chartIsAdjusted ? ["auto", "auto"] : baseDc.yDomain}
-                  tick={{ fontSize: 11, fill: C.textFaint }}
+                  domain={[yMin, yMax]}
+                  tick={{ fontSize: 10, fill: C.textFaint }}
                   axisLine={false}
                   tickLine={false}
                   tickFormatter={(v: number) => v.toFixed(0)}
                 />
                 <Tooltip content={<ForecastChartTooltip />} />
 
-                {/* Confidence band (stacked: transparent base + colored band) */}
+                {/* Phase background bands via ReferenceAreas */}
+                {signalWindowStart && (
+                  <ReferenceArea
+                    x1={signalWindowStart}
+                    x2={forecastStartPeriod}
+                    fill="rgba(217,119,6,0.05)"
+                    fillOpacity={1}
+                    ifOverflow="extendDomain"
+                  />
+                )}
+                <ReferenceArea
+                  x1={forecastStartPeriod}
+                  x2={adjustedChartData[adjustedChartData.length - 1]?.period}
+                  fill="rgba(22,163,74,0.03)"
+                  fillOpacity={1}
+                  ifOverflow="extendDomain"
+                />
+
+                {/* Confidence band / uncertainty cone */}
                 <Area
                   stackId="band"
                   type="monotone"
@@ -2675,7 +2794,7 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
                   type="monotone"
                   dataKey="bandWidth"
                   stroke="none"
-                  fill="rgba(22,163,74,0.10)"
+                  fill="url(#bandGradient)"
                   activeDot={false}
                   isAnimationActive={false}
                 />
@@ -2685,27 +2804,39 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
                   type="monotone"
                   dataKey="actual"
                   stroke={C.text}
-                  strokeWidth={2}
+                  strokeWidth={2.5}
                   dot={false}
                   activeDot={{ r: 4, fill: C.text, stroke: "#fff", strokeWidth: 2 }}
-                  name="Actual"
+                  name="Historical actual"
                 />
 
-                {/* Forecast median line */}
+                {/* Baseline forecast (grey) */}
+                <Line
+                  type="monotone"
+                  dataKey="baseline"
+                  stroke="#94a3b8"
+                  strokeWidth={1.5}
+                  strokeDasharray="4 3"
+                  dot={false}
+                  activeDot={{ r: 3, fill: "#94a3b8", stroke: "#fff", strokeWidth: 2 }}
+                  name="Baseline forecast"
+                />
+
+                {/* Signal-adjusted forecast (green) */}
                 <Line
                   type="monotone"
                   dataKey="forecast"
                   stroke={C.green}
-                  strokeWidth={2}
-                  strokeDasharray="6 3"
+                  strokeWidth={2.5}
+                  strokeDasharray={chartIsAdjusted ? "0" : "6 3"}
                   dot={false}
                   activeDot={{ r: 4, fill: C.green, stroke: "#fff", strokeWidth: 2 }}
-                  name="Forecast median"
+                  name={chartIsAdjusted ? "Signal-adjusted" : "Forecast"}
                 />
 
-                {/* Separator between historical and forecast */}
+                {/* Forecast start divider — derived from data */}
                 <ReferenceLine
-                  x="W4 Feb"
+                  x={forecastStartPeriod}
                   stroke={C.textFaint}
                   strokeDasharray="4 4"
                   strokeWidth={1}
@@ -2718,71 +2849,146 @@ function SignalIntelligence({ domain, onGenerate, parsedResult, csvSignals, comb
                   />
                 </ReferenceLine>
 
-                {/* Event markers */}
-                {chartEvents.map((evt) => (
+                {/* Event / driver markers with direction */}
+                {chartEvents.slice(0, 4).map((evt, idx) => {
+                  const evDir = (evt as { direction?: string }).direction;
+                  const markerColor = evDir === "up" ? C.green : evDir === "down" ? C.red : C.amber;
+                  const arrow = evDir === "up" ? "\u2191" : evDir === "down" ? "\u2193" : "\u2022";
+                  return (
                   <ReferenceDot
-                    key={evt.period}
+                    key={`${evt.period}-${idx}`}
                     x={evt.period}
                     y={evt.value}
                     r={5}
-                    fill={C.amber}
+                    fill={markerColor}
                     stroke="#fff"
                     strokeWidth={2}
                   >
                     <Label
-                      value={evt.label}
-                      position="top"
+                      value={`${arrow} ${evt.label}`}
+                      position={idx % 2 === 0 ? "top" : "bottom"}
                       offset={12}
-                      style={{ fontSize: 10, fill: C.textSec, fontWeight: 500 }}
+                      style={{ fontSize: 9, fill: C.textSec, fontWeight: 500 }}
                     />
                   </ReferenceDot>
-                ))}
+                  );
+                })}
+
+                {/* Endpoint callouts */}
+                {baselineEnd !== undefined && lastRow && (
+                  <ReferenceDot x={lastRow.period} y={baselineEnd} r={0} fill="none" stroke="none">
+                    <Label value={baselineEnd.toFixed(1)} position="right" offset={6} style={{ fontSize: 10, fill: "#94a3b8", fontWeight: 600 }} />
+                  </ReferenceDot>
+                )}
+                {forecastEnd !== undefined && lastRow && chartIsAdjusted && (
+                  <ReferenceDot x={lastRow.period} y={forecastEnd} r={0} fill="none" stroke="none">
+                    <Label value={`${forecastEnd.toFixed(1)} (${endpointDelta > 0 ? "+" : ""}${endpointDelta.toFixed(1)})`} position="right" offset={6} style={{ fontSize: 10, fill: C.green, fontWeight: 600 }} />
+                  </ReferenceDot>
+                )}
 
                 <Legend
                   verticalAlign="bottom"
-                  height={32}
+                  height={28}
                   iconType="line"
-                  wrapperStyle={{ fontSize: "11px", color: C.textMuted }}
-                  formatter={(value: string) => <span style={{ color: C.textSec, fontSize: "11px" }}>{value}</span>}
+                  wrapperStyle={{ fontSize: "10px", color: C.textMuted }}
+                  formatter={(value: string) => <span style={{ color: C.textSec, fontSize: "10px" }}>{value}</span>}
                 />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
+
+          {/* Diagnostics strip */}
+          <div style={{
+            marginTop: "12px", padding: "10px 16px",
+            background: "#f8fafc", border: `1px solid ${C.borderSub}`, borderRadius: "8px",
+            display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: "12px",
+          }}>
+            {[
+              { label: "Forecast shift", value: shiftPct === 0 ? "—" : `${shiftPct > 0 ? "+" : ""}${shiftPct}%`, color: shiftPct > 0 ? C.green : shiftPct < 0 ? C.red : C.textMuted },
+              { label: "Signal strength", value: chartIsAdjusted ? (Math.abs(shiftPct) > 4 ? "High" : Math.abs(shiftPct) > 1.5 ? "Medium" : "Low") : "—", color: chartIsAdjusted ? (Math.abs(shiftPct) > 4 ? C.green : C.amber) : C.textMuted },
+              { label: "Volatility", value: volMetric?.value || "—", color: volMetric?.color || C.textMuted },
+              { label: "Confidence", value: confMetric?.value || "—", color: C.text },
+              { label: "Horizon", value: horizonMetric?.value || "—", color: C.text },
+              { label: "Top driver", value: topDriverMetric?.value || "—", color: C.text },
+            ].map(d => (
+              <div key={d.label}>
+                <p style={{ fontSize: "10px", color: C.textFaint, margin: "0 0 2px", textTransform: "uppercase", letterSpacing: "0.3px" }}>{d.label}</p>
+                <p style={{ fontSize: "13px", fontWeight: 600, color: d.color, margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{d.value}</p>
+              </div>
+            ))}
+          </div>
         </div>
 
-        {/* Right-side forecast metrics */}
-        <div style={{ ...card, padding: "20px", display: "flex", flexDirection: "column", gap: "0px" }}>
-          <h4 style={{ fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 16px" }}>
-            Forecast metrics
-          </h4>
-          {chartMetrics.map((m, i) => (
-            <div key={m.label} style={{
-              padding: "10px 0",
-              borderBottom: i < chartMetrics.length - 1 ? `1px solid ${C.borderSub}` : "none",
-            }}>
-              <p style={{ fontSize: "11px", color: C.textMuted, margin: "0 0 3px" }}>{m.label}</p>
-              <p style={{
-                fontSize: m.label === "Top driver" ? "12px" : "14px",
-                fontWeight: 600, color: m.color, margin: 0,
-                lineHeight: m.label === "Top driver" ? 1.4 : undefined,
-                wordBreak: m.label === "Top driver" ? "break-word" as const : undefined,
-              }}>{m.value}</p>
-            </div>
-          ))}
+        {/* Right panel — Forecast movement explained */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+          {/* Movement explanation */}
+          <div style={{ ...card, padding: "18px" }}>
+            <h4 style={{ fontSize: "13px", fontWeight: 600, color: C.text, margin: "0 0 12px" }}>
+              Forecast movement explained
+            </h4>
+            {activeIntel.drivers.slice(0, 4).map((dr, i) => {
+              const dirLabel = dr.contribution > 0 ? "Upward" : dr.contribution < 0 ? "Downward" : "Neutral";
+              const dirColor = dr.contribution > 0 ? C.green : dr.contribution < 0 ? C.red : C.textMuted;
+              return (
+                <div key={i} style={{
+                  padding: "8px 0",
+                  borderBottom: i < Math.min(activeIntel.drivers.length, 4) - 1 ? `1px solid ${C.borderSub}` : "none",
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: "12px", color: C.text, fontWeight: 500 }}>{dr.name}</span>
+                    <span style={{ fontSize: "12px", fontWeight: 600, color: dirColor }}>
+                      {dr.contribution > 0 ? "+" : ""}{dr.contribution}%
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: "6px", marginTop: "3px" }}>
+                    <span style={{ fontSize: "10px", color: dirColor, fontWeight: 500 }}>{dirLabel}</span>
+                    <span style={{ fontSize: "10px", color: C.textFaint }}>|</span>
+                    <span style={{ fontSize: "10px", color: C.textFaint }}>{confMetric?.value || "—"} conf.</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Endpoint summary card */}
+          <div style={{ ...card, padding: "18px" }}>
+            <h4 style={{ fontSize: "13px", fontWeight: 600, color: C.text, margin: "0 0 10px" }}>
+              Endpoint summary
+            </h4>
+            {[
+              { label: "Baseline endpoint", value: baselineEnd?.toFixed(1) || "—", color: "#94a3b8" },
+              { label: "Signal-adjusted endpoint", value: forecastEnd?.toFixed(1) || "—", color: C.green },
+              { label: "Delta vs baseline", value: endpointDelta === 0 ? "—" : `${endpointDelta > 0 ? "+" : ""}${endpointDelta.toFixed(1)}`, color: endpointDelta > 0 ? C.green : endpointDelta < 0 ? C.red : C.textMuted },
+              { label: "Forecast shift", value: shiftPct === 0 ? "—" : `${shiftPct > 0 ? "+" : ""}${shiftPct}%`, color: shiftPct > 0 ? C.green : shiftPct < 0 ? C.red : C.textMuted },
+            ].map((m, i) => (
+              <div key={m.label} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "7px 0",
+                borderBottom: i < 3 ? `1px solid ${C.borderSub}` : "none",
+              }}>
+                <span style={{ fontSize: "11px", color: C.textMuted }}>{m.label}</span>
+                <span style={{ fontSize: "13px", fontWeight: 600, color: m.color }}>{m.value}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Mode indicator */}
           <div style={{
-            marginTop: "14px", padding: "10px 12px",
+            padding: "10px 14px",
             background: C.greenSubtle, border: `1px solid ${C.greenBorder}`,
             borderRadius: "8px",
           }}>
             <p style={{ fontSize: "11px", color: C.green, margin: 0, fontWeight: 500 }}>
-              {llmResponse ? "LLM-structured intelligence" : hasSource ? "Source-adjusted demo mode" : "Deterministic demo mode"}
+              {llmResponse ? "LLM-structured intelligence" : hasSource ? "Source-adjusted demo" : "Deterministic demo"}
             </p>
             <p style={{ fontSize: "10px", color: C.textMuted, margin: "3px 0 0" }}>
-              {llmResponse ? (llmResponse.chart_guidance?.model_mode || "LLM-structured source intelligence; no live scraping.") : hasSource ? "Uploaded/entered source signals adjust this deterministic forecast path. No live model/API used." : "Baseline domain sample data. Upload files, paste a URL, or enter a note to adjust."}
+              {llmResponse ? (llmResponse.chart_guidance?.model_mode || "LLM-structured source intelligence") : hasSource ? "Source signals adjust this deterministic forecast." : "Baseline domain data. Upload sources to adjust."}
             </p>
           </div>
         </div>
       </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2798,85 +3004,320 @@ function ForecastDecisionPack({ domain, parsedResult, csvSignals, combinedReadou
   const briefOutlookText = combinedReadout?.reasoning || b.outlookText;
   const risks = activeIntel.hasSourceInput ? activeIntel.risks : b.risks;
 
+  // ── Decision stance derivation ──
+  const confNum = parseInt(briefConfidence) || 65;
+  const olLower = briefOutlook.toLowerCase();
+  const stance = olLower.includes("bullish") && !olLower.includes("mild")
+    ? "Secure near-term coverage"
+    : olLower.includes("mild") || (olLower.includes("mixed") && olLower.includes("bullish"))
+    ? "Hedge upside exposure"
+    : olLower.includes("bearish")
+    ? "Delay purchase"
+    : confNum < 55
+    ? "Escalate to analyst review"
+    : "Hold and monitor";
+  const urgency = confNum >= 75 ? "High" : confNum >= 60 ? "Medium" : "Low";
+  const urgencyColor = urgency === "High" ? C.red : urgency === "Medium" ? C.amber : C.textMuted;
+  const topDriver = activeIntel.drivers[0]?.name || "Source signals";
+  const outlookColor = olLower.includes("bullish") ? C.green : olLower.includes("bearish") ? C.red : C.amber;
+  const dirColor = (dir: string) => dir === "Bullish" ? C.green : dir === "Bearish" ? C.red : dir === "Watch" || dir === "Mixed" ? C.amber : C.textMuted;
+
+  // ── Volatility regime ──
+  const mixedSignals = activeIntel.signals.filter(s => s.direction === "Watch" || s.direction === "Mixed" || s.direction === "Bearish");
+  const volRegime = mixedSignals.length >= 3 ? "High" : mixedSignals.length >= 1 ? "Elevated" : "Low";
+  const volColor = volRegime === "High" ? C.red : volRegime === "Elevated" ? C.amber : C.green;
+
+  // ── Baseline vs signal-adjusted labels ──
+  const baselineLabel = b.outlook === "Bullish" ? "Mild upward pressure"
+    : b.outlook === "Mixed / Bullish" ? "Moderate mixed pressure" : "Neutral baseline";
+  const adjustedLabel = activeIntel.hasSourceInput
+    ? (olLower.includes("bullish") ? "Stronger upward pressure after source-derived signals" : olLower.includes("bearish") ? "Downward revision after source-derived signals" : "Modified outlook after source-derived signals")
+    : "No signal adjustment — using domain baseline";
+
+  // ── Recommendation cards (domain-aware) ──
+  const recCards: { title: string; action: string; priority: string; priorityColor: string; confidence: string; why: string }[] = (() => {
+    const hi = { priority: "High", priorityColor: C.red };
+    const med = { priority: "Medium", priorityColor: C.amber };
+    const lo = { priority: "Low", priorityColor: C.textMuted };
+    const conf = briefConfidence;
+    if (domain === "freight") return [
+      { title: "Procurement implication", action: olLower.includes("bullish") ? "Lock rates on key lanes within 1–2 weeks" : olLower.includes("bearish") ? "Delay rate commitments — spot may soften" : "Monitor spot vs. contract spread before committing", ...hi, confidence: conf, why: `${topDriver} is driving rate pressure. Delaying may increase exposure.` },
+      { title: "Hedging / rate exposure", action: olLower.includes("bullish") ? "Consider forward cover on volatile routes" : "Reduce hedge ratio — downside risk is limited", ...(olLower.includes("bullish") ? hi : med), confidence: conf, why: `Volatility regime is ${volRegime.toLowerCase()}. ${activeIntel.drivers[1]?.name || "Route demand"} adds uncertainty.` },
+      { title: "Monitoring cadence", action: volRegime === "High" ? "Increase to daily monitoring" : volRegime === "Elevated" ? "Maintain weekly review cycle" : "Standard bi-weekly review sufficient", ...lo, confidence: conf, why: `${activeIntel.signals.length} active signals across ${allEvidence.length} sources. ${volRegime} volatility.` },
+    ];
+    if (domain === "agriculture") return [
+      { title: "Procurement timing", action: olLower.includes("bullish") ? "Accelerate near-term purchases before price adjustment" : olLower.includes("bearish") ? "Defer purchases — prices may ease" : "Stagger procurement across 2–4 week windows", ...hi, confidence: conf, why: `${topDriver} is the primary price driver. Timing sensitivity is elevated.` },
+      { title: "Weather / supply exposure", action: activeIntel.signals.some(s => s.name.toLowerCase().includes("weather")) ? "Monitor weather models weekly — revision risk is material" : "Supply-side risk is contained — standard monitoring", ...med, confidence: conf, why: `Weather and harvest signals affect near-term supply estimates.` },
+      { title: "Inventory planning", action: olLower.includes("bullish") ? "Build safety stock — upside price risk" : "Maintain standard inventory levels", ...(olLower.includes("bullish") ? med : lo), confidence: conf, why: `Inventory cost vs. price exposure trade-off given ${volRegime.toLowerCase()} volatility.` },
+    ];
+    // mining (default)
+    return [
+      { title: "Buy / hold timing", action: olLower.includes("bullish") ? "Accelerate near-term buying before further price increase" : olLower.includes("bearish") ? "Hold — wait for price correction" : "Maintain current position — no strong directional signal", ...hi, confidence: conf, why: `${topDriver} is driving price pressure. Timing matters in current ${volRegime.toLowerCase()} volatility regime.` },
+      { title: "Supply risk exposure", action: activeIntel.drivers.some(d => d.name.toLowerCase().includes("supply") || d.name.toLowerCase().includes("disruption")) ? "Diversify supplier base — disruption risk is elevated" : "Current supplier exposure is manageable", ...med, confidence: conf, why: `Supply disruption signals detected across ${allEvidence.length} sources.` },
+      { title: "Price volatility", action: volRegime === "High" ? "Hedge price exposure — volatility is elevated" : volRegime === "Elevated" ? "Monitor spread — hedge if band widens" : "No immediate hedging action required", ...(volRegime === "High" ? hi : lo), confidence: conf, why: `${mixedSignals.length} mixed/bearish signals contribute to ${volRegime.toLowerCase()} volatility.` },
+    ];
+  })();
+
+  // ── Ranked driver impact ──
+  const rankedDrivers = activeIntel.signals.slice(0, 6).map((sig, idx) => {
+    const contrib = activeIntel.drivers.find(d => d.name === sig.name);
+    const impact = contrib ? `${contrib.contribution > 0 ? "+" : ""}${contrib.contribution}%` : (sig.direction === "Bullish" ? "+moderate" : sig.direction === "Bearish" ? "-moderate" : "neutral");
+    const confVal = parseInt(sig.confidence) || 60;
+    const evidenceCount = Math.max(1, allEvidence.filter(e => e.toLowerCase().includes(sig.name.toLowerCase().split(" ")[0])).length);
+    const watchAction = sig.direction === "Bullish" ? "Monitor for reversal" : sig.direction === "Bearish" ? "Watch for easing" : "Track for directional clarity";
+    return { rank: idx + 1, name: sig.name, direction: sig.direction, directionColor: sig.directionColor, impact, confidence: `${confVal}%`, evidenceCount, watchAction };
+  });
+
+  // ── Watchlist triggers (domain-aware) ──
+  const triggerThreshold = confNum >= 75 ? "3%" : confNum >= 60 ? "5%" : "8%";
+  const watchlistTriggers = [
+    { condition: `Forecast shift exceeds ${triggerThreshold} vs. baseline`, action: "Escalate to analyst review", severity: "High" as const },
+    { condition: `Confidence drops below ${Math.max(40, confNum - 15)}%`, action: "Require analyst validation before acting", severity: "High" as const },
+    { condition: `Volatility regime moves to ${volRegime === "High" ? "extreme" : "high"}`, action: "Increase monitoring cadence to daily", severity: "Medium" as const },
+    { condition: `${topDriver} signal reverses direction`, action: "Review stance and re-run signal analysis", severity: "High" as const },
+    ...(domain === "freight" ? [{ condition: "New vessel capacity enters key lanes", action: "Re-evaluate rate exposure and hedging", severity: "Medium" as const }] : []),
+    ...(domain === "agriculture" ? [{ condition: "Weather forecast materially changes", action: "Re-assess harvest estimates and procurement timing", severity: "Medium" as const }] : []),
+    ...(domain === "mining" ? [{ condition: "Mine output resumes or disruption clears", action: "Reduce urgency — supply risk may ease", severity: "Medium" as const }] : []),
+  ];
+
+  // ── Risk reversal conditions ──
+  const reversalConditions: string[] = (() => {
+    const base = [
+      `${topDriver} reverses or clears faster than expected`,
+      "Source evidence becomes stale or contradictory",
+    ];
+    if (domain === "freight") return [...base, "Port congestion clears on major routes", "Demand weakens materially on key lanes", "Fuel cost trajectory reverses"];
+    if (domain === "agriculture") return [...base, "Weather risk does not materialize", "Trade policy normalizes", "Harvest estimates are revised upward"];
+    if (domain === "mining") return [...base, "Supply disruption resolves quickly", "Demand weakens below seasonal norms", "FX headwinds strengthen significantly"];
+    return [...base, "Primary driver reverses", "Market sentiment shifts on new data"];
+  })();
+
+  // ── Shared section styles ──
+  const sectionHead: React.CSSProperties = { fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 12px" };
+  const tinyLabel: React.CSSProperties = { fontSize: "10px", color: C.textFaint, margin: "0 0 2px", textTransform: "uppercase", letterSpacing: "0.3px" };
+
   return (
     <div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 370px", gap: "18px" }}>
-        {/* Left — decision brief */}
-        <div style={card}>
-          <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: "0 0 14px" }}>Decision brief</h3>
+      {/* ─── 1. Recommended Decision Stance ─── */}
+      <div style={{ ...card, marginBottom: "16px", padding: "20px 24px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px" }}>
+          <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: 0 }}>
+            Recommended Decision Stance
+          </h3>
+          <span style={{
+            padding: "3px 10px", borderRadius: "10px", fontSize: "11px", fontWeight: 600,
+            background: C.greenSubtle, border: `1px solid ${C.greenBorder}`, color: C.green,
+          }}>{stance}</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "16px", marginBottom: "14px" }}>
+          {[
+            { label: "Confidence", value: briefConfidence, color: C.text },
+            { label: "Urgency", value: urgency, color: urgencyColor },
+            { label: "Outlook", value: briefOutlook, color: outlookColor },
+            { label: "Top driver", value: topDriver, color: C.text },
+          ].map(m => (
+            <div key={m.label}>
+              <p style={tinyLabel}>{m.label}</p>
+              <p style={{ fontSize: m.label === "Top driver" ? "13px" : "14px", fontWeight: 600, color: m.color, margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{m.value}</p>
+            </div>
+          ))}
+        </div>
+        <p style={{ fontSize: "12px", color: C.textSec, margin: 0, lineHeight: 1.6 }}>
+          {activeIntel.hasSourceInput
+            ? `Signal-adjusted forecast shifted from baseline after applying ${activeIntel.signals.length} source-derived market signals. Primary driver: ${topDriver}. Recommended action: ${stance.toLowerCase()}.`
+            : `Baseline forecast based on domain defaults. Upload sources or paste a URL to refine the signal-adjusted forecast and decision stance.`}
+        </p>
+      </div>
 
-          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "18px" }}>
-            {[
-              { text: `Market: ${b.market}`, green: false },
-              { text: `Outlook: ${briefOutlook}`, green: true },
-              { text: `Confidence: ${briefConfidence}`, green: false },
-            ].map((chip) => (
-              <span key={chip.text} style={{
-                padding: "5px 12px", borderRadius: "20px", fontSize: "12px",
-                background: chip.green ? C.greenSubtle : "#f3f4f6",
-                border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
-                color: chip.green ? C.green : C.textSec,
-                fontWeight: chip.green ? 500 : 400,
-              }}>{chip.text}</span>
+      {/* ─── 2. What Changed vs Baseline ─── */}
+      <div style={{ ...card, marginBottom: "16px", padding: "20px 24px" }}>
+        <h4 style={sectionHead}>What Changed vs Baseline</h4>
+        <div style={{ display: "grid", gridTemplateColumns: "20% 40% 40%", gap: "0", fontSize: "12px" }}>
+          {/* Header */}
+          <div style={{ padding: "8px 10px", borderBottom: `1px solid ${C.borderSub}` }} />
+          <div style={{ padding: "8px 10px", borderBottom: `1px solid ${C.borderSub}`, background: "rgba(148,163,184,0.06)", borderTopLeftRadius: "6px" }}>
+            <span style={{ ...tinyLabel, margin: 0 }}>Baseline view</span>
+          </div>
+          <div style={{ padding: "8px 10px", borderBottom: `1px solid ${C.borderSub}`, background: "rgba(22,163,74,0.05)", borderTopRightRadius: "6px" }}>
+            <span style={{ ...tinyLabel, margin: 0 }}>Signal-adjusted</span>
+          </div>
+          {/* Rows */}
+          {([
+            { label: "Forecast pressure", baseline: b.outlook, adjusted: briefOutlook, adjColor: outlookColor },
+            { label: "Volatility regime", baseline: "Moderate", adjusted: volRegime, adjColor: volColor },
+            { label: "Top driver", baseline: DOMAINS[domain].drivers[0]?.name || "—", adjusted: topDriver, adjColor: C.text },
+            { label: "Recommended stance", baseline: "Hold and monitor", adjusted: stance, adjColor: C.green },
+          ] as { label: string; baseline: string; adjusted: string; adjColor: string }[]).map((row, i) => {
+            const isLast = i === 3;
+            const rowBorder = isLast ? "none" : `1px solid ${C.borderSub}`;
+            return (
+            <React.Fragment key={row.label}>
+              <div style={{ padding: "9px 10px", borderBottom: rowBorder, color: C.textMuted, fontWeight: 500 }}>{row.label}</div>
+              <div style={{ padding: "9px 10px", borderBottom: rowBorder, color: C.textFaint, background: "rgba(148,163,184,0.06)", borderBottomLeftRadius: isLast ? "6px" : undefined }}>{row.baseline}</div>
+              <div style={{ padding: "9px 10px", borderBottom: rowBorder, color: row.adjColor, fontWeight: 500, background: "rgba(22,163,74,0.05)", borderBottomRightRadius: isLast ? "6px" : undefined }}>{row.adjusted}</div>
+            </React.Fragment>
+            );
+          })}
+        </div>
+        {activeIntel.hasSourceInput && (
+          <p style={{ fontSize: "11px", color: C.textMuted, margin: "12px 0 0", lineHeight: 1.5 }}>
+            {adjustedLabel}
+          </p>
+        )}
+      </div>
+
+      {/* ─── 3. Recommendation Cards ─── */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "14px", marginBottom: "16px" }}>
+        {recCards.map((rc) => (
+          <div key={rc.title} style={{ ...card, padding: "18px 20px", display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
+              <h4 style={{ fontSize: "13px", fontWeight: 600, color: C.text, margin: 0 }}>{rc.title}</h4>
+              <span style={{
+                padding: "2px 8px", borderRadius: "8px", fontSize: "10px", fontWeight: 600,
+                background: rc.priorityColor === C.red ? "rgba(220,38,38,0.08)" : rc.priorityColor === C.amber ? "rgba(217,119,6,0.08)" : "#f3f4f6",
+                border: `1px solid ${rc.priorityColor === C.red ? "rgba(220,38,38,0.20)" : rc.priorityColor === C.amber ? "rgba(217,119,6,0.20)" : C.border}`,
+                color: rc.priorityColor,
+              }}>{rc.priority}</span>
+            </div>
+            <p style={{ fontSize: "12px", color: C.text, margin: "0 0 10px", lineHeight: 1.55, fontWeight: 500, flex: 1 }}>{rc.action}</p>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "8px" }}>
+              <span style={{ fontSize: "10px", color: C.textFaint }}>Confidence: <strong style={{ color: C.textSec }}>{rc.confidence}</strong></span>
+            </div>
+            <p style={{ fontSize: "11px", color: C.textMuted, margin: 0, lineHeight: 1.5 }}>{rc.why}</p>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 370px", gap: "16px", marginBottom: "16px" }}>
+        {/* ─── Left column ─── */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+
+          {/* ─── 4. Ranked Driver Impact ─── */}
+          <div style={card}>
+            <h4 style={sectionHead}>Ranked Driver Impact</h4>
+            <div style={{
+              display: "grid", gridTemplateColumns: "32px 1.4fr 70px 70px 60px 50px 1fr",
+              padding: "0 0 8px", borderBottom: `1px solid ${C.borderSub}`,
+            }}>
+              {["#", "Driver", "Direction", "Impact", "Conf.", "Src", "Watch action"].map(h => (
+                <span key={h} style={{ fontSize: "10px", color: C.textFaint, fontWeight: 500, textTransform: "uppercase" }}>{h}</span>
+              ))}
+            </div>
+            {rankedDrivers.map((d, i) => (
+              <div key={d.rank} style={{
+                display: "grid", gridTemplateColumns: "32px 1.4fr 70px 70px 60px 50px 1fr",
+                alignItems: "center", padding: "9px 0",
+                borderBottom: i < rankedDrivers.length - 1 ? `1px solid rgba(0,0,0,0.04)` : "none",
+              }}>
+                <span style={{ fontSize: "12px", color: C.textFaint, fontWeight: 600 }}>{d.rank}</span>
+                <span style={{ fontSize: "12px", color: C.text, fontWeight: 500 }}>{d.name}</span>
+                <span style={{ fontSize: "11px", color: d.directionColor, fontWeight: 500 }}>{d.direction}</span>
+                <span style={{ fontSize: "12px", color: d.direction === "Bullish" ? C.green : d.direction === "Bearish" ? C.red : C.textSec, fontWeight: 600 }}>{d.impact}</span>
+                <span style={{ fontSize: "11px", color: C.textSec }}>{d.confidence}</span>
+                <span style={{ fontSize: "11px", color: C.textFaint }}>{d.evidenceCount}</span>
+                <span style={{ fontSize: "11px", color: C.textMuted }}>{d.watchAction}</span>
+              </div>
             ))}
           </div>
 
-          <label style={{ fontSize: "12px", color: C.textMuted, display: "block", marginBottom: "9px" }}>
-            Market outlook
-          </label>
-          <div style={{
-            padding: "15px", background: "rgba(22,163,74,0.05)",
-            border: `1px solid rgba(22,163,74,0.14)`, borderRadius: "8px", marginBottom: "22px",
-          }}>
-            <p style={{ fontSize: "13px", color: C.textSec, margin: 0, lineHeight: 1.65 }}>{briefOutlookText}</p>
-          </div>
-
-          <label style={{ fontSize: "12px", color: C.textMuted, display: "block", marginBottom: "9px" }}>
-            Risk watchlist
-          </label>
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "26px" }}>
-            {risks.map((r, i) => (
-              <div key={i} style={{
-                padding: "11px 13px", background: "#fafafa",
-                border: `1px solid ${C.borderSub}`, borderRadius: "8px",
-                fontSize: "13px", color: C.textSec,
-              }}>• {r}</div>
-            ))}
-          </div>
-
-          <div style={{ display: "flex", gap: "10px" }}>
-            <button style={{
-              padding: "10px 22px", background: C.green, color: "#fff",
-              border: "none", borderRadius: "8px", fontSize: "13px", fontWeight: 600, cursor: "pointer",
-            }}>Export brief (demo)</button>
-            <button style={{
-              padding: "10px 22px", background: "transparent", color: C.textSec,
-              border: `1px solid ${C.borderInput}`, borderRadius: "8px",
-              fontSize: "13px", cursor: "pointer",
-            }}>Share with analysts (demo)</button>
+          {/* ─── 5. Decision Brief (market outlook + export) ─── */}
+          <div style={card}>
+            <h4 style={sectionHead}>Decision Brief</h4>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "14px" }}>
+              {[
+                { text: `Market: ${b.market}`, green: false },
+                { text: `Outlook: ${briefOutlook}`, green: true },
+                { text: `Confidence: ${briefConfidence}`, green: false },
+              ].map((chip) => (
+                <span key={chip.text} style={{
+                  padding: "4px 10px", borderRadius: "20px", fontSize: "11px",
+                  background: chip.green ? C.greenSubtle : "#f3f4f6",
+                  border: `1px solid ${chip.green ? C.greenBorder : C.border}`,
+                  color: chip.green ? C.green : C.textSec,
+                  fontWeight: chip.green ? 500 : 400,
+                }}>{chip.text}</span>
+              ))}
+            </div>
+            <div style={{
+              padding: "14px", background: "rgba(22,163,74,0.05)",
+              border: `1px solid rgba(22,163,74,0.14)`, borderRadius: "8px", marginBottom: "16px",
+            }}>
+              <p style={{ fontSize: "12px", color: C.textSec, margin: 0, lineHeight: 1.65 }}>{briefOutlookText}</p>
+            </div>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <button style={{
+                padding: "9px 20px", background: C.green, color: "#fff",
+                border: "none", borderRadius: "8px", fontSize: "12px", fontWeight: 600, cursor: "pointer",
+              }}>Export brief (demo)</button>
+              <button style={{
+                padding: "9px 20px", background: "transparent", color: C.textSec,
+                border: `1px solid ${C.borderInput}`, borderRadius: "8px",
+                fontSize: "12px", cursor: "pointer",
+              }}>Share with analysts (demo)</button>
+            </div>
           </div>
         </div>
 
-        {/* Right column */}
+        {/* ─── Right column ─── */}
         <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-          {/* Forecast pack */}
-          <div style={card}>
-            <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: "0 0 3px" }}>Forecast pack</h3>
-            <p style={{ fontSize: "12px", color: C.textFaint, margin: "0 0 16px" }}>Training-signal-ready output</p>
 
+          {/* ─── 6. Watchlist Triggers ─── */}
+          <div style={card}>
+            <h4 style={sectionHead}>Watchlist Triggers</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              {watchlistTriggers.map((t, i) => (
+                <div key={i} style={{
+                  padding: "10px 12px", borderRadius: "8px",
+                  background: t.severity === "High" ? "rgba(220,38,38,0.04)" : "#fafafa",
+                  border: `1px solid ${t.severity === "High" ? "rgba(220,38,38,0.12)" : C.borderSub}`,
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
+                    <span style={{
+                      fontSize: "9px", fontWeight: 600, textTransform: "uppercase",
+                      color: t.severity === "High" ? C.red : C.amber,
+                    }}>{t.severity}</span>
+                    <span style={{ fontSize: "11px", color: C.text, fontWeight: 500 }}>{t.condition}</span>
+                  </div>
+                  <p style={{ fontSize: "11px", color: C.textMuted, margin: 0 }}>{t.action}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ─── 7. Risk Reversal Conditions ─── */}
+          <div style={card}>
+            <h4 style={sectionHead}>What Could Invalidate This View?</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              {reversalConditions.map((rc, i) => (
+                <div key={i} style={{
+                  display: "flex", alignItems: "flex-start", gap: "8px",
+                  padding: "8px 12px", background: "#fafafa",
+                  border: `1px solid ${C.borderSub}`, borderRadius: "8px",
+                }}>
+                  <span style={{ fontSize: "12px", color: C.amber, flexShrink: 0, marginTop: "1px" }}>!</span>
+                  <span style={{ fontSize: "12px", color: C.textSec, lineHeight: 1.5 }}>{rc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ─── 8. Forecast Pack (training signals) ─── */}
+          <div style={card}>
+            <h4 style={{ fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 3px" }}>Forecast Pack</h4>
+            <p style={{ fontSize: "11px", color: C.textFaint, margin: "0 0 12px" }}>Training-signal-ready output</p>
             <div style={{
               display: "grid", gridTemplateColumns: "2fr 50px 65px 42px",
-              paddingBottom: "8px", borderBottom: `1px solid ${C.borderSub}`,
+              paddingBottom: "7px", borderBottom: `1px solid ${C.borderSub}`,
             }}>
               {["Feature", "Value", "Direction", "Src"].map((h) => (
-                <span key={h} style={{ fontSize: "11px", color: C.textFaint, fontWeight: 500 }}>{h}</span>
+                <span key={h} style={{ fontSize: "10px", color: C.textFaint, fontWeight: 500, textTransform: "uppercase" }}>{h}</span>
               ))}
             </div>
             {allFeatures.map((f, i) => (
               <div key={i} style={{
                 display: "grid", gridTemplateColumns: "2fr 50px 65px 42px",
-                alignItems: "center", padding: "9px 0",
+                alignItems: "center", padding: "8px 0",
                 borderBottom: i < allFeatures.length - 1 ? `1px solid rgba(0,0,0,0.04)` : "none",
               }}>
                 <span style={{ fontSize: "11px", color: C.textSec, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
@@ -2886,22 +3327,22 @@ function ForecastDecisionPack({ domain, parsedResult, csvSignals, combinedReadou
               </div>
             ))}
             <button style={{
-              marginTop: "13px", width: "100%", padding: "9px",
+              marginTop: "12px", width: "100%", padding: "8px",
               background: "#f8fafc", color: C.textSec,
               border: `1px solid ${C.borderInput}`, borderRadius: "8px",
-              fontSize: "12px", fontWeight: 500, cursor: "pointer",
+              fontSize: "11px", fontWeight: 500, cursor: "pointer",
             }}>Export signal table (demo)</button>
           </div>
 
-          {/* Source evidence */}
+          {/* ─── 9. Source Evidence ─── */}
           <div style={card}>
-            <h3 style={{ fontSize: "15px", fontWeight: 600, color: C.text, margin: "0 0 13px" }}>Source evidence</h3>
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            <h4 style={{ fontSize: "14px", fontWeight: 600, color: C.text, margin: "0 0 10px" }}>Source Evidence</h4>
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
               {allEvidence.map((ev, i) => (
                 <div key={i} style={{
-                  padding: "10px 13px", background: "#fafafa",
+                  padding: "9px 12px", background: "#fafafa",
                   border: `1px solid ${C.borderSub}`, borderRadius: "8px",
-                  fontSize: "13px", color: C.textSec,
+                  fontSize: "12px", color: C.textSec,
                 }}>{ev}</div>
               ))}
             </div>
