@@ -1,0 +1,6 @@
+commodity,region,disruption_type,severity,week
+Copper,Chile,Mine outage,High,W2 Feb
+Nickel,Indonesia,Export restriction,Medium,W2 Feb
+Lithium,Australia,Shipment delay,Medium,W2 Feb
+Copper,Peru,Logistics disruption,Low,W2 Feb
+Nickel,Philippines,Production slowdown,Medium,W3 Feb

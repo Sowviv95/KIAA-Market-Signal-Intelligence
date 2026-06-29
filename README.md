@@ -156,6 +156,16 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
 
 See `backend/README.md` for full setup, endpoints, and test payloads.
 
+### Configured source sync (Sprint 5J/5K)
+
+The backend exposes `GET /sync-sources?domain=freight|mining|agriculture` which reads files from `sample_data/sync_drop/<domain>/`. This simulates files dropped by scraper output jobs, FTP syncs, or data pipeline exports. In production, this folder would be replaced by a watch folder or scheduled sync integration.
+
+- Sync is domain-aware — only files for the selected domain are returned
+- Click **Sync configured sources** on the Signal Intake screen to pull files from the domain sync folder
+- Configured sync appears as one aggregated source row in the intake preview (e.g. "Configured freight market sync — 5 synced sources"), while all synced files remain part of the Generate payload
+- Click **Generate market signals** to include synced sources in the LLM payload
+- No live scraping or FTP is implemented in the demo
+
 ## Tech stack
 
 - React 18 + TypeScript

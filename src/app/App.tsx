@@ -157,6 +157,101 @@ async function callLLMMarketSignals(
   return res.json();
 }
 
+// ── Configured source sync client ─────────────────────────────────────────
+
+interface SyncFileEntry {
+  file_name: string;
+  file_type: string;
+  size_bytes: number;
+  summary: string;
+  headers: string[];
+  row_count: number;
+  json_keys: string[];
+  text_preview: string;
+}
+
+interface SyncResponse {
+  source: string;
+  domain?: string;
+  folder: string;
+  files: SyncFileEntry[];
+  message?: string;
+}
+
+async function fetchSyncSources(domain: DomainId): Promise<SyncResponse> {
+  const res = await fetch(`${BACKEND_URL}/sync-sources?domain=${encodeURIComponent(domain)}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Sync error ${res.status}`);
+  }
+  return res.json();
+}
+
+function syncFilesToUploadedSources(files: SyncFileEntry[]): UploadedSource[] {
+  return files.map((f) => {
+    const ext = f.file_type === "csv" ? "csv" : f.file_type === "json" ? "json" : f.file_type === "txt" ? "txt" : "unsupported" as FileExtension;
+    return {
+      id: `sync-${f.file_name}-${Date.now()}`,
+      name: f.file_name,
+      extension: ext,
+      status: "parsed" as const,
+      detectedDomain: detectDomainFromName(f.file_name),
+      sourceCategory: "Configured sync",
+      rowCount: f.row_count || undefined,
+      columnCount: f.headers.length || undefined,
+      columns: f.headers.length > 0 ? f.headers : undefined,
+      preview: f.text_preview.slice(0, 300),
+      message: f.summary,
+    };
+  });
+}
+
+type PreviewSource = { name: string; type: string; status: string; quality: string; subtitle?: string };
+
+function buildSourcePreview(
+  url: string,
+  note: string,
+  uploadedFiles: UploadedSource[],
+): PreviewSource[] {
+  const rows: PreviewSource[] = [];
+  if (url) {
+    const ul = url.toLowerCase();
+    const label = ul.includes("drewry") || ul.includes("container-index") ? "Drewry World Container Index URL"
+      : ul.includes("baltic") || ul.includes("bdi") ? "Baltic index URL"
+      : ul.includes("freight") || ul.includes("shipping") ? "Freight intelligence URL"
+      : ul.includes("mine") || ul.includes("metal") || ul.includes("copper") ? "Mining intelligence URL"
+      : ul.includes("crop") || ul.includes("usda") || ul.includes("agri") ? "Agriculture intelligence URL"
+      : "Market source URL";
+    rows.push({ name: label, type: "URL source", status: "Parsed", quality: "High" });
+  }
+  if (note) {
+    rows.push({ name: "Pasted market note", type: "Unstructured note", status: "Parsed", quality: note.length > 50 ? "High" : "Medium" });
+  }
+  // Separate manual uploads from configured sync files
+  const manualFiles = uploadedFiles.filter((f) => f.status === "parsed" && f.sourceCategory !== "Configured sync");
+  const syncFiles = uploadedFiles.filter((f) => f.status === "parsed" && f.sourceCategory === "Configured sync");
+
+  for (const uf of manualFiles) {
+    const typeLabel = uf.extension === "csv" ? "Structured data" : uf.extension === "json" ? "Source metadata" : "Text source";
+    rows.push({ name: uf.name, type: uf.sourceCategory || typeLabel, status: "Parsed", quality: uf.extension === "csv" ? "High" : "Medium" });
+  }
+
+  if (syncFiles.length > 0) {
+    // Detect dominant domain from synced files for label
+    const domains = syncFiles.map((f) => f.detectedDomain).filter(Boolean);
+    const domLabel = domains.length > 0 ? domains[0] : "market";
+    rows.push({
+      name: `Configured ${domLabel} market sync`,
+      type: "Configured sync",
+      status: "Ready",
+      quality: "High",
+      subtitle: `${syncFiles.length} synced source${syncFiles.length !== 1 ? "s" : ""} from scraper output folder`,
+    });
+  }
+
+  return rows;
+}
+
 // ── Domain data ────────────────────────────────────────────────────────────
 
 const DOMAINS: Record<DomainId, {
@@ -1772,6 +1867,7 @@ function AddDomainModal({ onClose, onAdd }: { onClose: () => void; onAdd: (name:
 function SignalIntake({
   domain, setDomain, onGenerate, onAddDomain, customLabel, parsedResult,
   uploadedFiles, onFilesUploaded, csvSignals, generateStatus, generateError, generatedSources, sourcesDirty,
+  onSyncSources, syncStatus,
 }: {
   domain: DomainId;
   setDomain: (d: DomainId) => void;
@@ -1786,6 +1882,8 @@ function SignalIntake({
   generateError: string | null;
   generatedSources: { name: string; type: string; status: string; quality: string }[];
   sourcesDirty: boolean;
+  onSyncSources: () => void;
+  syncStatus: "idle" | "syncing" | "done" | "error";
 }) {
   const [dropOpen, setDropOpen] = useState(false);
   const [url, setUrl] = useState("");
@@ -2008,6 +2106,40 @@ function SignalIntake({
 
           <div style={{ marginTop: "22px" }}>
             <label style={{ fontSize: "12px", color: C.textMuted, display: "block", marginBottom: "7px" }}>
+              Configured source sync
+            </label>
+            <div style={{
+              border: `1px solid ${C.borderInput}`, borderRadius: "8px",
+              padding: "14px 16px", background: "#fafafa",
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+            }}>
+              <div>
+                <p style={{ fontSize: "12px", color: C.textSec, margin: "0 0 2px" }}>
+                  Sync files from configured scraper output folders or market-data drop locations.
+                </p>
+                <p style={{ fontSize: "11px", color: C.textFaint, margin: 0 }}>
+                  Demo reads from sample_data/sync_drop
+                </p>
+              </div>
+              <button
+                onClick={onSyncSources}
+                disabled={syncStatus === "syncing"}
+                style={{
+                  padding: "8px 16px", background: syncStatus === "syncing" ? C.textFaint : C.greenSubtle,
+                  border: `1px solid ${C.greenBorder}`, borderRadius: "8px",
+                  fontSize: "12px", fontWeight: 500, color: C.green,
+                  cursor: syncStatus === "syncing" ? "not-allowed" : "pointer",
+                  whiteSpace: "nowrap", opacity: syncStatus === "syncing" ? 0.7 : 1,
+                }}
+              >{syncStatus === "syncing" ? "Syncing..." : syncStatus === "done" ? "Re-sync sources" : "Sync configured sources"}</button>
+            </div>
+            {syncStatus === "error" && (
+              <p style={{ fontSize: "11px", color: C.red, margin: "4px 0 0" }}>Sync failed. Ensure the backend is running.</p>
+            )}
+          </div>
+
+          <div style={{ marginTop: "22px" }}>
+            <label style={{ fontSize: "12px", color: C.textMuted, display: "block", marginBottom: "7px" }}>
               Paste market note
             </label>
             <textarea
@@ -2033,38 +2165,18 @@ function SignalIntake({
 
           {(() => {
             // Use snapshot from last generate run if available; otherwise build from live inputs
-            const currentSources: { name: string; type: string; status: string; quality: string }[] =
-              generatedSources.length > 0 ? generatedSources : (() => {
-                const live: { name: string; type: string; status: string; quality: string }[] = [];
-                if (url) {
-                  const urlLower = url.toLowerCase();
-                  const urlLabel = urlLower.includes("drewry") || urlLower.includes("container-index")
-                    ? "Drewry World Container Index URL"
-                    : urlLower.includes("baltic") || urlLower.includes("bdi") ? "Baltic index URL"
-                    : urlLower.includes("freight") || urlLower.includes("shipping") ? "Freight intelligence URL"
-                    : urlLower.includes("mine") || urlLower.includes("metal") || urlLower.includes("copper") ? "Mining intelligence URL"
-                    : urlLower.includes("crop") || urlLower.includes("usda") || urlLower.includes("agri") ? "Agriculture intelligence URL"
-                    : "Market source URL";
-                  live.push({ name: urlLabel, type: "URL source", status: "Parsed", quality: "High" });
-                }
-                if (note) {
-                  live.push({ name: "Pasted market note", type: "Unstructured note", status: "Parsed", quality: note.length > 50 ? "High" : "Medium" });
-                }
-                for (const uf of uploadedFiles.filter((f) => f.status === "parsed")) {
-                  const typeLabel = uf.extension === "csv" ? "Structured data" : uf.extension === "json" ? "Source metadata" : "Text source";
-                  live.push({ name: uf.name, type: uf.sourceCategory || typeLabel, status: "Parsed", quality: uf.extension === "csv" ? "High" : "Medium" });
-                }
-                return live;
-              })();
+            const currentSources: PreviewSource[] =
+              generatedSources.length > 0 ? generatedSources : buildSourcePreview(url, note, uploadedFiles);
 
-            const sourceCount = currentSources.length;
-            const hasAnySrc = sourceCount > 0;
+            // Real source count includes actual files, not aggregated preview rows
+            const realCount = (url ? 1 : 0) + (note ? 1 : 0) + uploadedFiles.filter((f) => f.status === "parsed").length;
+            const hasAnySrc = currentSources.length > 0;
 
             return hasAnySrc ? (
               <>
                 <div style={{ display: "flex", gap: "7px", flexWrap: "wrap", marginBottom: sourcesDirty ? "8px" : "14px" }}>
                   {[
-                    { text: `${sourceCount} source${sourceCount !== 1 ? "s" : ""} parsed`, green: true },
+                    { text: `${realCount} source${realCount !== 1 ? "s" : ""} parsed`, green: true },
                     ...(generateStatus === "done" && !sourcesDirty ? [{ text: "Ready", green: true }] : []),
                     ...(sourcesDirty ? [{ text: "Changed", green: false }] : []),
                   ].map((chip) => (
@@ -2089,6 +2201,7 @@ function SignalIntake({
                       <div>
                         <p style={{ fontSize: "13px", fontWeight: 500, color: C.text, margin: 0 }}>{src.name}</p>
                         <p style={{ fontSize: "11px", color: C.textFaint, margin: "2px 0 0" }}>{src.type}</p>
+                        {src.subtitle && <p style={{ fontSize: "10px", color: C.textMuted, margin: "2px 0 0" }}>{src.subtitle}</p>}
                       </div>
                       <div style={{ display: "flex", gap: "6px" }}>
                         <span style={{ padding: "3px 8px", background: "#f3f4f6", borderRadius: "4px", fontSize: "11px", color: C.textSec }}>{src.status}</span>
@@ -2761,6 +2874,7 @@ export default function App() {
   const [generateStatus, setGenerateStatus] = useState<GenerateStatus>("idle");
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [generatedSources, setGeneratedSources] = useState<{ name: string; type: string; status: string; quality: string }[]>([]);
+  const [syncStatus, setSyncStatus] = useState<"idle" | "syncing" | "done" | "error">("idle");
 
   // LLM intel takes priority; fall back to deterministic
   const deterministicIntel = getActiveIntelligence(domain, parsedResult, csvSignals, combinedReadout);
@@ -2773,29 +2887,29 @@ export default function App() {
     setDomain(d); setParsedResult(null); setUploadedFiles([]); setCsvSignals([]);
     setCombinedReadout(null); setLlmIntel(null); setLlmResponse(null);
     setGenerateStatus("idle"); setGenerateError(null); setGeneratedSources([]);
+    setSyncStatus("idle");
+  };
+
+  const handleSyncSources = async () => {
+    setSyncStatus("syncing");
+    try {
+      const resp = await fetchSyncSources(domain);
+      const synced = syncFilesToUploadedSources(resp.files);
+      // Remove any previous sync files before adding new ones
+      const manualOnly = uploadedFiles.filter((f) => f.sourceCategory !== "Configured sync");
+      const next = [...manualOnly, ...synced];
+      setUploadedFiles(next);
+      setCsvSignals(extractSignalsFromUploadedFiles(next, domain));
+      setGeneratedSources([]); // clear snapshot so preview rebuilds from live inputs
+      setSyncStatus(synced.length > 0 ? "done" : "idle");
+    } catch {
+      setSyncStatus("error");
+    }
   };
 
   const handleGenerate = async (url: string, note: string) => {
     // Snapshot the sources used in this run so preview persists across tab navigation
-    const snapshot: { name: string; type: string; status: string; quality: string }[] = [];
-    if (url) {
-      const ul = url.toLowerCase();
-      const label = ul.includes("drewry") || ul.includes("container-index") ? "Drewry World Container Index URL"
-        : ul.includes("baltic") || ul.includes("bdi") ? "Baltic index URL"
-        : ul.includes("freight") || ul.includes("shipping") ? "Freight intelligence URL"
-        : ul.includes("mine") || ul.includes("metal") || ul.includes("copper") ? "Mining intelligence URL"
-        : ul.includes("crop") || ul.includes("usda") || ul.includes("agri") ? "Agriculture intelligence URL"
-        : "Market source URL";
-      snapshot.push({ name: label, type: "URL source", status: "Parsed", quality: "High" });
-    }
-    if (note) {
-      snapshot.push({ name: "Pasted market note", type: "Unstructured note", status: "Parsed", quality: note.length > 50 ? "High" : "Medium" });
-    }
-    for (const uf of uploadedFiles.filter((f) => f.status === "parsed")) {
-      const typeLabel = uf.extension === "csv" ? "Structured data" : uf.extension === "json" ? "Source metadata" : "Text source";
-      snapshot.push({ name: uf.name, type: uf.sourceCategory || typeLabel, status: "Parsed", quality: uf.extension === "csv" ? "High" : "Medium" });
-    }
-    setGeneratedSources(snapshot);
+    setGeneratedSources(buildSourcePreview(url, note, uploadedFiles));
 
     // Always run deterministic extraction for CSV signals
     const cs = extractSignalsFromUploadedFiles(uploadedFiles, domain);
@@ -2894,6 +3008,8 @@ export default function App() {
             generateError={generateError}
             generatedSources={generatedSources}
             sourcesDirty={sourcesDirty}
+            onSyncSources={handleSyncSources}
+            syncStatus={syncStatus}
           />
         )}
         {tab === "intelligence" && (

@@ -1,0 +1,11 @@
+port,region,congestion_pct,waiting_days,queue_size,week
+Shanghai,Asia-Pacific,78,4.2,32,W1 Feb
+Singapore,Asia-Pacific,72,3.8,28,W1 Feb
+Busan,Asia-Pacific,68,3.5,24,W1 Feb
+Rotterdam,Europe,45,1.8,12,W1 Feb
+Los Angeles,North America,52,2.1,18,W1 Feb
+Shanghai,Asia-Pacific,82,4.6,36,W2 Feb
+Singapore,Asia-Pacific,75,4.1,30,W2 Feb
+Busan,Asia-Pacific,71,3.9,26,W2 Feb
+Rotterdam,Europe,48,2.0,14,W2 Feb
+Los Angeles,North America,55,2.4,20,W2 Feb
